@@ -51,6 +51,55 @@ class A2AMessage(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
+HISTORICAL_PATTERNS = {
+    "TECHNICAL_PROBLEM": {"median": 41, "min": 25, "max": 73, "sample_size": 23104, "description": "technical or signal issues"},
+    "POLICE_ACTIVITY": {"median": 33, "min": 20, "max": 50, "sample_size": 2393, "description": "police incidents"},
+    "MEDICAL_EMERGENCY": {"median": 33, "min": 23, "max": 63, "sample_size": 1953, "description": "medical emergencies"},
+    "ACCIDENT": {"median": 40, "min": 18, "max": 68, "sample_size": 1047, "description": "accidents"},
+    "MAINTENANCE": {"median": 46, "min": 28, "max": 82, "sample_size": 976, "description": "maintenance work"},
+    "UNKNOWN_CAUSE": {"median": 34, "min": 21, "max": 90, "sample_size": 12061, "description": "unspecified incidents"},
+}
+
+
+def is_historical_query(query: str) -> bool:
+    q = query.lower()
+    indicators = [
+        "based on past", "historical", "typically", "usually",
+        "on average", "how long does", "how long do", "how long will",
+    ]
+    return any(i in q for i in indicators)
+
+
+def extract_cause_from_query(query: str) -> str:
+    q = query.lower()
+    if any(w in q for w in ["police", "investigation"]):
+        return "POLICE_ACTIVITY"
+    if any(w in q for w in ["medical", "passenger"]):
+        return "MEDICAL_EMERGENCY"
+    if any(w in q for w in ["technical", "signal", "equipment"]):
+        return "TECHNICAL_PROBLEM"
+    if any(w in q for w in ["accident", "collision"]):
+        return "ACCIDENT"
+    if any(w in q for w in ["maintenance", "construction", "scheduled", "work"]):
+        return "MAINTENANCE"
+    return "UNKNOWN_CAUSE"
+
+
+def format_historical_answer(query: str, route: Optional[str], current_alert_count: int) -> str:
+    cause = extract_cause_from_query(query)
+    pattern = HISTORICAL_PATTERNS.get(cause, HISTORICAL_PATTERNS["UNKNOWN_CAUSE"])
+    route_text = f" on the {route} Line" if route else ""
+
+    response = (
+        f"There {'is' if current_alert_count == 1 else 'are'} currently {current_alert_count} active alert(s){route_text}. "
+        f"Based on {pattern['sample_size']:,} past {pattern['description']} in MBTA data (2020-2023), "
+        f"typical resolution is about {pattern['median']} minutes "
+        f"(usual range {pattern['min']}-{pattern['max']} minutes). "
+        "If your trip is time-sensitive, plan extra time or use an alternative route."
+    )
+    return response
+
+
 def parse_route_from_query(query: str) -> Optional[str]:
     """
     Extract route/line name from user query.
@@ -280,6 +329,15 @@ async def a2a_message(message: A2AMessage):
             
             # Get alerts from MBTA API
             result = get_alerts(route=route)
+
+            # Historical/predictive question path: enrich response with duration guidance
+            if result.get("ok") and is_historical_query(query):
+                result["text"] = format_historical_answer(
+                    query=query,
+                    route=route,
+                    current_alert_count=result.get("count", 0)
+                )
+                result["summary"] = "Historical estimate with current alert context"
             
             # Return A2A response
             return {

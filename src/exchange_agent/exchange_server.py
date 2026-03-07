@@ -1,4 +1,13 @@
-# src/exchange_agent/exchange_server.py
+﻿# src/exchange_agent/exchange_server.py
+
+"""
+Exchange Agent - Hybrid A2A + MCP Orchestrator
+Version 4.0 - Intelligent Expertise-Based Routing
+
+Routes queries based on domain expertise needs:
+- Simple fact lookups Ã¢â€ â€™ MCP (fast API wrappers)
+- Queries needing predictions/analysis/recommendations Ã¢â€ â€™ A2A (domain experts)
+"""
 
 import sys
 import os
@@ -14,9 +23,9 @@ try:
     from src.observability.otel_config import setup_otel
     from src.observability.clickhouse_logger import get_clickhouse_logger
     setup_otel("exchange-agent")
-    print("✅ OpenTelemetry configured for exchange-agent")
+    print("Ã¢Å“â€¦ OpenTelemetry configured for exchange-agent")
 except Exception as e:
-    print(f"⚠️  Could not setup observability: {e}")
+    print(f"Ã¢Å¡Â Ã¯Â¸Â  Could not setup observability: {e}")
     import traceback
     traceback.print_exc()
     print("Continuing without telemetry...")
@@ -24,18 +33,15 @@ except Exception as e:
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from pydantic import BaseModel, Field, create_model
-from typing import Optional, Dict, Any, List
+from pydantic import BaseModel
+from typing import Optional, Dict, Any, List, Literal
 import logging
 import time
 import uuid
 import json
 import asyncio
 import random
-from langchain.agents import create_agent
-from langchain_openai import ChatOpenAI
-from langchain_core.tools import StructuredTool
-from langchain_mcp_adapters.tools import load_mcp_tools
+import re
 
 # Add parent directory to Python path for imports
 if __name__ == "__main__":
@@ -60,14 +66,14 @@ logger = logging.getLogger(__name__)
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     logger.error("=" * 60)
-    logger.error("❌ OPENAI_API_KEY not found in environment!")
+    logger.error("Ã¢ÂÅ’ OPENAI_API_KEY not found in environment!")
     logger.error("=" * 60)
     logger.error("Please ensure .env file exists in project root with:")
     logger.error("  OPENAI_API_KEY=sk-...")
     logger.error("=" * 60)
     sys.exit(1)
 else:
-    logger.info(f"✓ OpenAI API key loaded (ends with: ...{api_key[-4:]})")
+    logger.info(f"Ã¢Å“â€œ OpenAI API key loaded (ends with: ...{api_key[-4:]})")
 
 # Initialize OpenAI client
 from openai import OpenAI
@@ -82,7 +88,7 @@ clickhouse_logger = None
 try:
     from opentelemetry import trace
     tracer = trace.get_tracer(__name__)
-    logger.info("✅ OpenTelemetry tracer initialized")
+    logger.info("Ã¢Å“â€¦ OpenTelemetry tracer initialized")
 except ImportError:
     # Fallback no-op tracer
     class NoOpTracer:
@@ -93,7 +99,7 @@ except ImportError:
                 yield type('obj', (object,), {'set_attribute': lambda *args: None, 'set_status': lambda *args: None, 'record_exception': lambda *args: None})()
             return _span()
     tracer = NoOpTracer()
-    logger.warning("⚠️  OpenTelemetry not available, using no-op tracer")
+    logger.warning("Ã¢Å¡Â Ã¯Â¸Â  OpenTelemetry not available, using no-op tracer")
 
 
 @asynccontextmanager
@@ -107,33 +113,33 @@ async def lifespan(app: FastAPI):
     
     # Startup
     logger.info("=" * 60)
-    logger.info("Starting Exchange Agent with Hybrid A2A + MCP Support")
+    logger.info("Starting Exchange Agent v4.0 - Intelligent Expertise Router")
     logger.info("=" * 60)
     
     # Initialize ClickHouse Logger
     try:
         clickhouse_logger = get_clickhouse_logger()
-        logger.info("✅ ClickHouse logger initialized")
+        logger.info("Ã¢Å“â€¦ ClickHouse logger initialized")
     except Exception as e:
-        logger.warning(f"⚠️  ClickHouse logger initialization failed: {e}")
+        logger.warning(f"Ã¢Å¡Â Ã¯Â¸Â  ClickHouse logger initialization failed: {e}")
         clickhouse_logger = None
     
     # Initialize StateGraph Orchestrator (for A2A path)
     try:
         stategraph_orchestrator = StateGraphOrchestrator()
-        logger.info("✅ StateGraph Orchestrator initialized")
+        logger.info("Ã¢Å“â€¦ StateGraph Orchestrator initialized")
         
         # Validate registry connectivity and agent discovery
-        logger.info("🔍 Validating registry connectivity...")
+        logger.info("Ã°Å¸â€Â Validating registry connectivity...")
         await stategraph_orchestrator.startup_validation()
-        logger.info("✅ Registry validation passed - A2A path ready")
+        logger.info("Ã¢Å“â€¦ Registry validation passed - A2A path ready")
         
     except RuntimeError as e:
-        logger.error(f"❌ Registry validation failed: {e}")
+        logger.error(f"Ã¢ÂÅ’ Registry validation failed: {e}")
         logger.error("A2A path unavailable - agents not discoverable")
         stategraph_orchestrator = None
     except Exception as e:
-        logger.error(f"❌ StateGraph Orchestrator initialization failed: {e}")
+        logger.error(f"Ã¢ÂÅ’ StateGraph Orchestrator initialization failed: {e}")
         logger.exception(e)
         stategraph_orchestrator = None
     
@@ -141,9 +147,9 @@ async def lifespan(app: FastAPI):
     try:
         mcp_client = MCPClient()
         await mcp_client.initialize()
-        logger.info("✅ MCP Client initialized - Fast path available")
+        logger.info("Ã¢Å“â€¦ MCP Client initialized - Fast path available")
     except Exception as e:
-        logger.warning(f"⚠️  MCP Client initialization failed: {e}")
+        logger.warning(f"Ã¢Å¡Â Ã¯Â¸Â  MCP Client initialization failed: {e}")
         logger.warning("Falling back to A2A agents only")
         mcp_client = None
     
@@ -155,14 +161,14 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Exchange Agent...")
     if mcp_client:
         await mcp_client.cleanup()
-    logger.info("✓ Shutdown complete")
+    logger.info("Ã¢Å“â€œ Shutdown complete")
 
 
 # Create FastAPI app with lifespan
 app = FastAPI(
     title="MBTA Exchange Agent",
-    description="Hybrid A2A + MCP Orchestrator with Unified LLM Routing + Shortcut Path",
-    version="3.2.0",
+    description="Hybrid A2A + MCP with LLM-Based Intelligent Routing",
+    version="5.0.0",
     lifespan=lifespan
 )
 
@@ -184,13 +190,13 @@ try:
     
     # Auto-instrument FastAPI (all endpoints)
     FastAPIInstrumentor.instrument_app(app)
-    logger.info("✅ FastAPI auto-instrumentation enabled")
+    logger.info("Ã¢Å“â€¦ FastAPI auto-instrumentation enabled")
     
     # Auto-instrument HTTPX (HTTP client for A2A calls)
     HTTPXClientInstrumentor().instrument()
-    logger.info("✅ HTTPX auto-instrumentation enabled")
+    logger.info("Ã¢Å“â€¦ HTTPX auto-instrumentation enabled")
 except Exception as e:
-    logger.warning(f"⚠️  Auto-instrumentation failed: {e}")
+    logger.warning(f"Ã¢Å¡Â Ã¯Â¸Â  Auto-instrumentation failed: {e}")
 
 
 # Request/Response models
@@ -198,6 +204,7 @@ class ChatRequest(BaseModel):
     query: str
     user_id: Optional[str] = "default_user"
     conversation_id: Optional[str] = None
+    routing_mode: Optional[Literal["auto", "mcp", "a2a", "shortcut"]] = "auto"
 
 
 class ChatResponse(BaseModel):
@@ -209,21 +216,16 @@ class ChatResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
-class Context(BaseModel):
-    query: str
-    conversation_id: Optional[str] = None
-    user_id: Optional[str] = None
-
-
 @app.get("/")
 async def root():
     """Health check endpoint"""
     return {
         "service": "MBTA Exchange Agent",
-        "version": "3.2.0",
-        "architecture": "Hybrid A2A + MCP with Unified LLM Routing + Shortcut Path",
-        "features": ["shortcut_path_for_greetings", "unified_routing", "multi_agent_orchestration"],
-        "optimization": "Single LLM call for Classification + Routing + Tool Selection",
+        "version": "5.0.0",
+        "architecture": "Hybrid A2A + MCP with LLM-Based Intelligent Routing",
+        "routing_logic": "GPT-4o-mini semantic classification (replaces keyword matching)",
+        "features": ["llm_routing", "domain_analysis", "multi_agent_orchestration"],
+        "optimization": "Semantic understanding of query intent",
         "mcp_available": mcp_client is not None and mcp_client._initialized,
         "stategraph_available": stategraph_orchestrator is not None,
         "clickhouse_available": clickhouse_logger is not None,
@@ -231,115 +233,95 @@ async def root():
     }
 
 
-
-# ============================================================================
-# SHORTCUT PATH HELPERS (NEW in v3.2.0)
-# ============================================================================
+# ============================================================
+# STEP 0: SHORTCUT PATH DETECTION (NO LLM CALL)
+# ============================================================
 
 def is_greeting_or_simple_query(query: str) -> bool:
-    """
-    Fast pattern matching to detect greetings and simple queries.
-    Returns True if query should take shortcut path (no LLM needed).
-    """
+    """Fast pattern matching to detect greetings and simple queries"""
     query_lower = query.lower().strip()
-    query_length = len(query_lower)
     
-    # Very short queries are likely greetings or simple
-    if query_length < 5:
-        return True
+    # Very short queries only (less than 10 words)
+    word_count = len(query_lower.split())
+    if word_count > 10:
+        return False
     
-    # Common greeting patterns
+    # Only match pure greetings
     greeting_patterns = [
         'hi', 'hello', 'hey', 'greetings', 'good morning',
-        'good afternoon', 'good evening', 'good day',
-        'howdy', 'sup', 'yo', 'hiya', "what's up", 'whats up'
+        'good afternoon', 'good evening', 'howdy', 'sup', 'yo'
     ]
     
-    # Simple help/info queries
-    help_patterns = [
-        'help', 'what can you do', 'what do you do',
-        'who are you', 'what are you', 'introduce yourself',
-        'capabilities', 'features', 'commands'
-    ]
-    
-    # Off topic / non MBTA patterns
-    offtopic_patterns = [
-        'weather', 'time', 'date', 'joke', 'story',
-        'game', 'movie', 'song', 'recipe', 'news'
-    ]
-    
-    all_patterns = greeting_patterns + help_patterns + offtopic_patterns
-    
-    # Check if query matches any pattern
-    for pattern in all_patterns:
-        if pattern in query_lower:
-            return True
-    
-    # Check if query is just a few words (likely greeting or off topic)
-    word_count = len(query_lower.split())
-    if word_count <= 3 and query_length < 20:
-        # Check if it contains MBTA related keywords
-        mbta_keywords = ['mbta', 'train', 'bus', 'subway', 'station', 'stop', 
-                        'route', 'line', 'red', 'orange', 'blue', 'green',
-                        'alert', 'delay', 'service', 'trip', 'schedule']
-        
-        has_mbta_keyword = any(keyword in query_lower for keyword in mbta_keywords)
-        
-        if not has_mbta_keyword:
-            return True
+    if any(query_lower == greeting or query_lower.startswith(greeting + " ") 
+           for greeting in greeting_patterns):
+        return True
     
     return False
 
 
 def get_shortcut_response(query: str) -> str:
-    """
-    Generate appropriate response for shortcut path queries.
-    No LLM needed, just template responses.
-    """
+    """Generate response for shortcut path queries (NO LLM NEEDED)"""
     query_lower = query.lower().strip()
     
-    # Greeting responses
-    greeting_keywords = ['hi', 'hello', 'hey', 'greetings', 'good morning', 
-                        'good afternoon', 'good evening', 'howdy']
+    greeting_keywords = ['hi', 'hello', 'hey', 'greetings']
     if any(keyword in query_lower for keyword in greeting_keywords):
         responses = [
-            "Hello! I'm MBTA Agentcy, your Boston transit assistant. I use semantic agent discovery to connect you with the right transit information. What would you like to know?",
-            "Hi there! I specialize in Boston MBTA transit information. I can help you with service alerts, route planning, and finding stops. What do you need?",
-            "Hey! I'm your MBTA transit assistant. Ask me about delays, routes, station locations, or trip planning!",
+            "Hello! I'm MBTA Agentcy. Ask about service alerts, routes, or stations!",
+            "Hi! I can help with Boston MBTA transit info.",
         ]
         return random.choice(responses)
     
-    # Help/capability responses
-    help_keywords = ['help', 'what can you do', 'what do you do', 'who are you', 
-                    'capabilities', 'features', 'commands']
-    if any(keyword in query_lower for keyword in help_keywords):
-        return """I'm MBTA Agentcy, your intelligent Boston transit assistant! I can help you with:
+    return "I'm specialized in Boston MBTA transit..."
 
-- **Service Alerts & Delays** - Real time information about disruptions, delays, and service changes
-- **Finding Stops & Stations** - Locate stations, find nearby stops, get stop details
-- **Route Planning** - Plan trips, get directions, find the best routes
-- **Predictions & Schedules** - Next train times, departure schedules, arrival predictions
-- **Live Vehicle Tracking** - See where trains and buses are right now
 
-I use advanced agent discovery to find the best way to answer your questions. Just ask me naturally about Boston transit!"""
+# ============================================================
+# NEW: INTELLIGENT EXPERTISE-BASED ROUTING
+# ============================================================
+
+def needs_domain_expertise(query: str) -> tuple[bool, str, List[str]]:
+    """
+    Detect if query needs domain expertise beyond API data.
     
-    # Off topic responses
-    return "I'm specialized in Boston MBTA transit information. I couldn't find agents that match your query. Could you try asking about:\\n\\n• Service alerts and delays\\n• Finding stops and stations\\n• Planning routes and trips\\n• Train/bus predictions and schedules"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    Simple keyword-based detection - fast and transparent.
+    
+    Returns:
+        (needs_expertise: bool, reasoning: str, detected_patterns: List[str])
+    """
+    
+    query_lower = query.lower()
+    detected_patterns = []
+    
+    # PREDICTIVE keywords
+    PREDICTIVE = ["should i wait", "worth waiting", "how long will", "when will"]
+    if any(kw in query_lower for kw in PREDICTIVE):
+        detected_patterns.append("predictive")
+        return True, "Query requires predictive analysis", detected_patterns
+    
+    # DECISION SUPPORT keywords
+    DECISION = ["should i", "recommend", "suggest", "better to", "what should i do"]
+    if any(kw in query_lower for kw in DECISION):
+        detected_patterns.append("decision_support")
+        return True, "Query needs decision support", detected_patterns
+    
+    # CONDITIONAL keywords
+    CONDITIONAL = ["if there are", "considering", "depending on"]
+    if any(kw in query_lower for kw in CONDITIONAL):
+        detected_patterns.append("conditional")
+        return True, "Query has conditional logic", detected_patterns
+    
+    # ANALYTICAL keywords
+    ANALYTICAL = ["why", "explain", "what caused", "how serious"]
+    if any(kw in query_lower for kw in ANALYTICAL):
+        detected_patterns.append("analytical")
+        return True, "Query needs analytical interpretation", detected_patterns
+    
+    # ROUTING pattern
+    if re.search(r"from .+ to .+", query_lower):
+        detected_patterns.append("routing")
+        return True, "Query requires multi-agent coordination", detected_patterns
+    
+    # DEFAULT: Simple fact lookup
+    return False, "Simple fact lookup - MCP can handle", detected_patterns
 
 
 # ============================================================================
@@ -358,12 +340,6 @@ async def classify_route_and_select_tool(query: str, available_tools: List[Dict]
         2. Path selection (MCP vs A2A)
         3. Tool selection with parameters (if MCP chosen)
     
-    This approach:
-    - Saves LLM costs on greetings (common in demos/presentations)
-    - Reduces latency for simple queries from ~400ms to under 10ms
-    - Provides clear visual distinction in Jaeger traces
-    - Maintains full capability for transit queries
-    
     Returns:
         {
             "path": "shortcut|mcp|a2a",
@@ -375,7 +351,6 @@ async def classify_route_and_select_tool(query: str, available_tools: List[Dict]
             # Only if path="shortcut":
             "shortcut_response": "Hello! I'm MBTA Agentcy...",
             "llm_calls": 0,
-            "agents_invoked": 0,
             
             # Only if path="mcp":
             "mcp_tool": "mbta_get_alerts",
@@ -389,51 +364,38 @@ async def classify_route_and_select_tool(query: str, available_tools: List[Dict]
         span.set_attribute("available_tools_count", len(available_tools))
         
         # ================================================================
-        # STEP 0: SHORTCUT PATH DETECTION (NO LLM CALL) - NEW in v3.2.0
+        # STEP 0: SHORTCUT PATH DETECTION (NO LLM CALL)
         # ================================================================
         if is_greeting_or_simple_query(query):
             with tracer.start_as_current_span("shortcut_path_detection") as shortcut_span:
                 shortcut_span.set_attribute("matched", True)
-                shortcut_span.set_attribute("query_type", "greeting_or_simple")
                 
-                # Generate response without LLM
                 shortcut_response = get_shortcut_response(query)
                 
                 decision = {
                     "path": "shortcut",
                     "intent": "greeting",
                     "confidence": 1.0,
-                    "reasoning": "Simple greeting or general query detected via pattern matching",
+                    "reasoning": "Simple greeting detected via pattern matching",
                     "complexity": 0.0,
                     "shortcut_response": shortcut_response,
-                    "llm_calls": 0,
-                    "agents_invoked": 0
+                    "llm_calls": 0
                 }
                 
-                # Mark in span for easy Jaeger filtering
                 span.set_attribute("routing.path", "shortcut")
-                span.set_attribute("routing.method", "pattern_matching")
                 span.set_attribute("llm.calls", 0)
-                span.set_attribute("intent", "greeting")
-                span.set_attribute("confidence", 1.0)
-                span.set_attribute("complexity", 0.0)
                 
-                logger.info(f"⚡ SHORTCUT PATH: {decision['reasoning']}")
-                logger.info(f"   Query: {query}")
-                logger.info(f"   Response: {shortcut_response[:100]}...")
-                logger.info(f"   Cost: $0.00 (no LLM call)")
+                logger.info(f"Ã¢Å¡Â¡ SHORTCUT PATH: {decision['reasoning']}")
                 
                 return decision
         
         # ================================================================
         # NOT A SHORTCUT - Proceed with full LLM routing
         # ================================================================
-        span.set_attribute("routing.path", "full_pipeline")
-        span.set_attribute("routing.method", "llm_classification")
         
         # Format available tools for the LLM
         tools_list = "\n".join([
-            f"  • {tool['name']}: {tool['description']}"
+            f"  Ã¢â‚¬Â¢ {tool['name']}: {tool['description']}"
             for tool in available_tools
         ]) if available_tools else "  (No MCP tools available - must use A2A)"
         
@@ -441,139 +403,61 @@ async def classify_route_and_select_tool(query: str, available_tools: List[Dict]
 
 **YOUR TASK:** Analyze the query and make ALL routing decisions in one response.
 
-═══════════════════════════════════════════════════════════
+Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 STEP 1: CLASSIFY INTENT
-═══════════════════════════════════════════════════════════
-- "alerts": Service alerts, delays, disruptions, issues
-  Examples: "Red Line delays?", "Any issues?", "What's happening on Orange Line?"
-  
-- "stops": Stop/station information, finding stops, stop details
-  Examples: "Find Harvard station", "Stops on Green Line", "Where is Park Street?"
-  
-- "trip_planning": Route planning, directions, how to get somewhere
-  Examples: "Park St to Harvard?", "How do I get to MIT?", "Route to Logan?"
-  
+Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+- "alerts": Service alerts, delays, disruptions
+- "stops": Stop/station information
+- "trip_planning": Route planning, directions
 - "general": Off topic, non MBTA queries
-  Examples: "What's the weather?", "Who won the game?"
 
-═══════════════════════════════════════════════════════════
-STEP 2: CHOOSE PATH & SELECT TOOL (IF APPLICABLE)
-═══════════════════════════════════════════════════════════
-
-**PATH DECISION TREE:**
-
-┌─ Is query about MBTA transit? ──NO──> path="a2a", intent="general"
-│
-└─ YES → Is it a simple fact lookup?
-          │
-          ├─ YES → Can an MCP tool handle it?
-          │        │
-          │        ├─ YES → path="mcp" + SELECT TOOL (Step 3)
-          │        └─ NO  → path="a2a"
-          │
-          └─ NO (complex/multi step) → path="a2a"
+Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
+STEP 2: CHOOSE PATH & SELECT TOOL
+Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
 **MCP Path (Fast, ~400ms):**
-- Best for: Single API call, real time data, simple fact lookup
-- Handles: alerts, predictions, vehicle tracking, stop search, schedules
-- Examples: "Red Line delays?", "Next train at Park St?", "Where are trains?"
-- → Proceed to STEP 3 to select tool
+- Best for: Single API call, simple fact lookup
+- Examples: "Red Line delays?", "Next train at Park St?"
 
 **A2A Path (Multi Agent, ~1500ms):**
-- Best for: Trip planning, conditional logic, multi step reasoning
-- Handles: complex routing, considering multiple factors
-- Examples: "Park St to Harvard?", "Best route if delays?", "Plan trip to airport"
-- → Skip tool selection, return path="a2a"
+- Best for: Trip planning, multi-step reasoning
+- Examples: "Park St to Harvard?", "Best route if delays?"
 
-═══════════════════════════════════════════════════════════
+Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 STEP 3: SELECT MCP TOOL (ONLY IF path="mcp")
-═══════════════════════════════════════════════════════════
+Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
 Available MCP Tools:
 {tools_list}
 
-**PARAMETER NAMING (CRITICAL):**
-- Use "route_id" NOT "route" (e.g., route_id="Red")
-- Use "stop_id" NOT "stop" (e.g., stop_id="place-pktrm")
-- Use "direction_id" NOT "direction" (0 or 1)
-- Use "latitude" and "longitude" for location based queries
-- Use "query" for text search (stop names, etc.)
+**PARAMETER NAMING:**
+- Use "route_id" NOT "route"
+- Red Line = "Red", Orange = "Orange", Blue = "Blue"
 
-**Common MBTA Route IDs:**
-- Red Line: "Red"
-- Orange Line: "Orange"
-- Blue Line: "Blue"
-- Green Line: "Green-B", "Green-C", "Green-D", "Green-E"
-
-**Tool Selection Strategy:**
-- Match query intent to tool capability
-- Extract parameters from natural language
-- If uncertain about parameters, prefer tools that accept fewer params
-- Examples:
-  * "Red Line delays" → mbta_get_alerts, route_id="Red"
-  * "Any alerts?" → mbta_list_all_alerts (no params needed)
-  * "Find Harvard" → mbta_search_stops, query="Harvard"
-
-═══════════════════════════════════════════════════════════
-CONFIDENCE & COMPLEXITY SCORING
-═══════════════════════════════════════════════════════════
-
-**Confidence (0.0 to 1.0):**
-- 0.9 to 1.0: Crystal clear intent and perfect tool match
-- 0.7 to 0.8: Reasonably clear
-- 0.5 to 0.6: Somewhat ambiguous
-- 0.0 to 0.4: Very ambiguous or off topic
-
-**Complexity (0.0 to 1.0):**
-- 0.0 to 0.3: Simple (single fact, one API call)
-- 0.4 to 0.6: Medium (some context needed)
-- 0.7 to 1.0: Complex (multi step, coordination, conditional logic)
-
-═══════════════════════════════════════════════════════════
+Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 OUTPUT FORMAT
-═══════════════════════════════════════════════════════════
+Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
 
-Return ONLY valid JSON (no markdown, no code blocks):
+Return ONLY valid JSON:
 
-**If path="mcp":**
 {{
   "intent": "alerts",
   "confidence": 0.95,
   "path": "mcp",
-  "reasoning": "Simple alert query for Red Line - direct API call possible",
+  "reasoning": "Simple alert query - direct API call",
   "complexity": 0.2,
   "mcp_tool": "mbta_get_alerts",
   "mcp_parameters": {{"route_id": "Red"}}
-}}
-
-**If path="a2a":**
-{{
-  "intent": "trip_planning",
-  "confidence": 0.9,
-  "path": "a2a",
-  "reasoning": "Complex routing query requires multi agent coordination",
-  "complexity": 0.8
-}}
-
-**If general/off topic:**
-{{
-  "intent": "general",
-  "confidence": 0.95,
-  "path": "a2a",
-  "reasoning": "Not MBTA related, route to general handler",
-  "complexity": 0.1
 }}"""
 
         user_message = f"""Query: "{query}"
 
-Analyze this query and provide complete routing decision."""
+Analyze and provide routing decision."""
 
         try:
             with tracer.start_as_current_span("llm_unified_routing") as llm_span:
                 llm_span.set_attribute("model", "gpt-4o-mini")
-                llm_span.set_attribute("purpose", "intent_classification_and_routing")
                 
-                # Make single LLM call
                 response = await asyncio.to_thread(
                     openai_client.chat.completions.create,
                     model="gpt-4o-mini",
@@ -587,13 +471,12 @@ Analyze this query and provide complete routing decision."""
                 
                 decision_text = response.choices[0].message.content.strip()
                 
-                # Remove markdown formatting if present
+                # Remove markdown formatting
                 if decision_text.startswith("```json"):
                     decision_text = decision_text.replace("```json", "").replace("```", "").strip()
                 elif decision_text.startswith("```"):
                     decision_text = decision_text.replace("```", "").strip()
                 
-                # Parse JSON response
                 decision = json.loads(decision_text)
                 
                 # Validate and set defaults
@@ -602,271 +485,149 @@ Analyze this query and provide complete routing decision."""
                 decision.setdefault("reasoning", "No reasoning provided")
                 decision["llm_calls"] = 1
                 
-                # Validate MCP path has required tool info
+                # Validate MCP path
                 if decision["path"] == "mcp":
                     if "mcp_tool" not in decision:
-                        logger.warning("MCP path selected but no tool specified - falling back to A2A")
+                        logger.warning("MCP selected but no tool - fallback to A2A")
                         decision["path"] = "a2a"
-                        decision["reasoning"] += " (fallback: no tool specified)"
                     elif "mcp_parameters" not in decision:
-                        logger.warning("MCP path selected but no parameters - using empty dict")
                         decision["mcp_parameters"] = {}
                 
-                # Add telemetry attributes
                 span.set_attribute("intent", decision['intent'])
                 span.set_attribute("confidence", decision['confidence'])
                 span.set_attribute("path", decision['path'])
-                span.set_attribute("complexity", decision['complexity'])
-                span.set_attribute("llm.calls", 1)
                 
-                if decision["path"] == "mcp":
-                    span.set_attribute("mcp_tool", decision.get('mcp_tool', 'unknown'))
-                    span.set_attribute("mcp_parameters", json.dumps(decision.get('mcp_parameters', {})))
-                
-                # Log decision
-                logger.info(f"🧠 Unified Decision:")
-                logger.info(f"   Intent: {decision['intent']} (confidence: {decision['confidence']:.2f})")
+                logger.info(f"Ã°Å¸Â§Â  LLM Decision:")
+                logger.info(f"   Intent: {decision['intent']} ({decision['confidence']:.2f})")
                 logger.info(f"   Path: {decision['path']} (complexity: {decision['complexity']:.2f})")
                 logger.info(f"   Reasoning: {decision['reasoning']}")
-                
-                if decision["path"] == "mcp":
-                    logger.info(f"   Tool: {decision['mcp_tool']}")
-                    logger.info(f"   Parameters: {decision['mcp_parameters']}")
                 
                 return decision
                 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response as JSON: {e}")
-            logger.error(f"Raw response: {decision_text}")
-            # Fallback to safe default
+            logger.error(f"JSON parse error: {e}")
             return {
                 "intent": "general",
                 "confidence": 0.3,
                 "path": "a2a",
-                "reasoning": f"JSON parsing error: {str(e)}",
+                "reasoning": f"JSON error: {str(e)}",
                 "complexity": 0.5,
                 "llm_calls": 1
             }
         except Exception as e:
-            logger.error(f"Unified routing failed: {e}", exc_info=True)
-            # Safe fallback
+            logger.error(f"Routing failed: {e}", exc_info=True)
             return {
                 "intent": "general",
                 "confidence": 0.3,
                 "path": "a2a",
-                "reasoning": f"Error in analysis: {str(e)}",
+                "reasoning": f"Error: {str(e)}",
                 "complexity": 0.5,
                 "llm_calls": 1
             }
 
 
-async def try_langchain_mcp_resolution(
-    query: str,
-    conversation_id: str,
-    user_id: Optional[str]
-) -> Optional[Dict[str, Any]]:
-    tools = await load_mcp_tools(mcp_client.session)
-
-    
-    if not tools:
-        return None
-
-    logger.info(f"Attempting MCP resolution with LangChain agent and {len(tools)} tools...")
-    # Remove the tool named "mbta_get_external_alerts" if because it returns a 404
-    tools = [tool for tool in tools if getattr(tool, "name", None) != "mbta_get_external_alerts"]
-    tools = _wrap_mcp_tools_with_tracing(tools)
-    logger.info(f"Tools: {[tool.name for tool in tools]}")
-
-    llm = ChatOpenAI(
-        model="gpt-4.1-mini",
-        temperature=0
-    )
-
-    tool_use_system_prompt = (
-        "You are an MBTA routing assistant. Use tools to gather real-time data "
-        "before answering complex questions. For complex queries, call multiple "
-        "tools as needed (alerts, predictions, routes, stops, trip planning) and "
-        "combine results. Prioritize delays/alerts when the user mentions them. "
-        "If a single tool suffices, use it once and answer concisely. "
-        "If the name of a stop doesn't match exactly, use a similar name that is a better match. "
-        "When you are done, review the question and your tool results, and if you don't have enough information to answer the question, call additional tools as needed."
-        "Never include follow up questions in your answer" # TODO: add conversation memory and then we can have follow up questions again
-    )
-
-    agent = create_agent(
-        llm,
-        tools,
-        context_schema=Context,
-        system_prompt=tool_use_system_prompt
-    )
-
-    try:
-        result = await agent.ainvoke(
-            {"messages": [{"role": "user", "content": query}]},
-            context=Context(
-                query=query,
-                conversation_id=conversation_id,
-                user_id=user_id
-            ).model_dump(exclude_none=True)
-        )
-
-    except Exception as e:
-        logger.warning(f"LangChain MCP agent failed: {e}")
-        return None
-
-    response_text = _extract_langchain_response_text(result)
-
-    if not response_text:
-        return None
-
-    return {
-        "response": response_text,
-        "method": "langchain_agent"
-    }
-
-
-def _extract_langchain_response_text(result: Any) -> Optional[str]:
-    if isinstance(result, dict):
-        direct = result.get("output") or result.get("response")
-        if direct:
-            return direct
-
-        messages = result.get("messages")
-        if isinstance(messages, list):
-            for message in reversed(messages):
-                content = getattr(message, "content", None)
-                if not content:
-                    continue
-                if message.__class__.__name__ == "AIMessage" or getattr(message, "type", None) == "ai":
-                    return content
-            for message in reversed(messages):
-                content = getattr(message, "content", None)
-                if content:
-                    return content
-
-    if result is None:
-        return None
-
-    return str(result)
-
-
-def _wrap_mcp_tools_with_tracing(tools: List[Any]) -> List[Any]:
-    wrapped_tools = []
-    for tool in tools:
-        tool_name = getattr(tool, "name", "unknown_tool")
-        description = getattr(tool, "description", "") or "MCP tool"
-        args_schema = getattr(tool, "args_schema", None)
-        return_direct = getattr(tool, "return_direct", False)
-
-        def _sync_call(*, _tool=tool, _name=tool_name, **kwargs):
-            span_name = f"mcp_tool.{_name}"
-            with tracer.start_as_current_span(span_name) as span:
-                span.set_attribute("tool_name", _name)
-                span.set_attribute("arguments", json.dumps(kwargs, default=str))
-                try:
-                    result = _tool.invoke(kwargs)
-                    span.set_attribute("result_size", len(str(result)))
-                    span.set_attribute("success", True)
-                    return result
-                except Exception as e:
-                    span.record_exception(e)
-                    span.set_attribute("success", False)
-                    raise
-
-        async def _async_call(*, _tool=tool, _name=tool_name, **kwargs):
-            span_name = f"mcp_tool.{_name}"
-            with tracer.start_as_current_span(span_name) as span:
-                span.set_attribute("tool_name", _name)
-                span.set_attribute("arguments", json.dumps(kwargs, default=str))
-                try:
-                    if hasattr(_tool, "ainvoke"):
-                        result = await _tool.ainvoke(kwargs)
-                    else:
-                        result = await asyncio.to_thread(_tool.invoke, kwargs)
-                    span.set_attribute("result_size", len(str(result)))
-                    span.set_attribute("success", True)
-                    return result
-                except Exception as e:
-                    span.record_exception(e)
-                    span.set_attribute("success", False)
-                    raise
-
-        wrapped_tools.append(
-            StructuredTool.from_function(
-                func=_sync_call,
-                coroutine=_async_call,
-                name=tool_name,
-                description=description,
-                args_schema=args_schema,
-                return_direct=return_direct
-            )
-        )
-
-    return wrapped_tools
-
-
 # ============================================================================
-# MAIN CHAT ENDPOINT (OPTIMIZED WITH SHORTCUT + UNIFIED ROUTING)
+# MAIN CHAT ENDPOINT
 # ============================================================================
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
-    Main chat endpoint with optimized hybrid MCP + A2A + Shortcut support
+    Main chat endpoint with intelligent expertise-based routing
     
     THREE PATHS:
-    1. SHORTCUT (~10ms) - Greetings, simple queries (no LLM, pattern matching only)
-    2. MCP (~400ms) - Simple transit queries (1 LLM call for routing + 1 for synthesis)
-    3. A2A (~1500ms) - Complex multi agent coordination (1 LLM call for routing)
-    
-    FULLY INSTRUMENTED with OpenTelemetry tracing and ClickHouse logging.
+    1. SHORTCUT (~10ms) - Greetings (pattern matching)
+    2. MCP (~400ms) - Simple fact lookups
+    3. A2A (~1500ms) - Queries needing domain expertise
     """
     
-    # Create root span for entire request
     with tracer.start_as_current_span("chat_endpoint") as root_span:
         start_time = time.time()
         query = request.query
         conversation_id = request.conversation_id or str(uuid.uuid4())
+        routing_mode = (request.routing_mode or "auto").strip().lower()
+        if routing_mode not in {"auto", "mcp", "a2a", "shortcut"}:
+            routing_mode = "auto"
         
-        # Add root span attributes
         root_span.set_attribute("query", query)
         root_span.set_attribute("conversation_id", conversation_id)
         root_span.set_attribute("user_id", request.user_id)
+        root_span.set_attribute("routing_mode", routing_mode)
         
         if not query or not query.strip():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
         logger.info("=" * 80)
-        logger.info(f"📨 Received query: {query}")
+        logger.info(f"Ã°Å¸â€œÂ¨ Received query: {query}")
         logger.info(f"   Conversation ID: {conversation_id}")
-        logger.info(f"   User ID: {request.user_id}")
         
-        
-
-        # ============================================================
         # Get available MCP tools
-        # ============================================================
         available_tools = []
         if mcp_client and mcp_client._initialized:
             if hasattr(mcp_client, '_available_tools') and mcp_client._available_tools:
                 for tool in mcp_client._available_tools:
                     available_tools.append({
                         "name": tool.name,
-                        "description": tool.description or "No description available"
+                        "description": tool.description or ""
                     })
-                logger.info(f"📋 {len(available_tools)} MCP tools available")
+                logger.info(f"Ã°Å¸â€œâ€¹ {len(available_tools)} MCP tools available")
         
-        # ============================================================
-        # UNIFIED ROUTING (WITH SHORTCUT CHECK) - NEW in v3.2.0
-        # Classification + Routing + Tool Selection Combined
-        # ============================================================
-        decision = await classify_route_and_select_tool(query, available_tools)
+        # ====================================================================
+        # STEP 1: INTELLIGENT EXPERTISE-BASED ROUTING (NEW in v4.0)
+        # ====================================================================
         
-        intent = decision["intent"]
-        confidence = decision["confidence"]
-        chosen_path = decision["path"]
+        with tracer.start_as_current_span("expertise_based_routing") as routing_span:
+            if routing_mode != "auto":
+                # Forced path for debugging/comparison only.
+                decision = await classify_route_and_select_tool(query, available_tools)
+                decision["path"] = routing_mode
+                decision["reasoning"] = f"Forced path via UI routing_mode={routing_mode}"
+                decision["confidence"] = 1.0
 
-        chosen_path="shortcut" if chosen_path == "shortcut" else "mcp"
+                needs_expertise = False
+                expertise_reasoning = "Forced routing - expertise override disabled"
+                detected_patterns = [f"forced:{routing_mode}"]
+
+                # Ensure shortcut path has a response template.
+                if routing_mode == "shortcut":
+                    decision["shortcut_response"] = get_shortcut_response(query)
+                    decision["llm_calls"] = 0
+            else:
+                # Analyze if query needs domain expertise (keyword-based)
+                needs_expertise, expertise_reasoning, detected_patterns = needs_domain_expertise(query)
+
+                routing_span.set_attribute("needs_expertise", needs_expertise)
+                routing_span.set_attribute("reasoning", expertise_reasoning)
+                routing_span.set_attribute("detected_patterns", str(detected_patterns))
+
+                logger.info(f"EXPERTISE ANALYSIS:")
+                logger.info(f"   Needs expertise: {needs_expertise}")
+                logger.info(f"   Reasoning: {expertise_reasoning}")
+                logger.info(f"   Patterns detected: {detected_patterns}")
+
+                # Still use unified LLM for intent classification and tool selection
+                decision = await classify_route_and_select_tool(query, available_tools)
+
+                # OVERRIDE path based on expertise analysis
+                if needs_expertise:
+                    original_path = decision["path"]
+                    decision["path"] = "a2a"
+                    decision["reasoning"] = f"EXPERTISE REQUIRED: {expertise_reasoning}"
+
+                    if original_path != "a2a":
+                        logger.info(f"   OVERRIDE: {original_path} -> a2a (expertise needed)")
+                    else:
+                        logger.info(f"   Confirmed A2A (expertise needed)")
+                else:
+                    # No expertise needed - MCP is fine if available
+                    if decision["path"] == "mcp":
+                        logger.info(f"   Confirmed MCP - {expertise_reasoning}")
+                    else:
+                        logger.info(f"   A2A path (LLM decision, no override)")
+
+            intent = decision["intent"]
+            confidence = decision["confidence"]
+            chosen_path = decision["path"]
         
         # Log to ClickHouse: User message
         if clickhouse_logger:
@@ -880,17 +641,21 @@ async def chat_endpoint(request: ChatRequest):
                     routed_to_orchestrator=(chosen_path == "a2a"),
                     metadata={
                         "confidence": confidence,
-                        "complexity": decision['complexity'],
+                        "complexity": decision.get('complexity', 0.5),
                         "reasoning": decision['reasoning'],
-                        "path": chosen_path
+                        "path": chosen_path,
+                        "needs_expertise": needs_expertise,
+                        "expertise_reasoning": expertise_reasoning,
+                        "detected_patterns": detected_patterns
                     }
                 )
             except Exception as e:
                 logger.warning(f"ClickHouse logging failed: {e}")
         
-        # ============================================================
-        # Execute chosen path
-        # ============================================================
+        # ====================================================================
+        # STEP 2: EXECUTE CHOSEN PATH
+        # ====================================================================
+        
         response_text = ""
         path_taken = ""
         metadata = {
@@ -899,102 +664,129 @@ async def chat_endpoint(request: ChatRequest):
                 "confidence": confidence,
                 "path": chosen_path,
                 "reasoning": decision["reasoning"],
-                "complexity": decision["complexity"],
-                "llm_calls": decision.get("llm_calls", 0)
+                "complexity": decision.get("complexity", 0.5),
+                "llm_calls": decision.get("llm_calls", 0),
+                "routing_mode": routing_mode
+            },
+            "expertise_analysis": {
+                "needs_expertise": needs_expertise,
+                "reasoning": expertise_reasoning,
+                "detected_patterns": detected_patterns
             }
         }
         
         if chosen_path == "shortcut":
-            # ========================================================
-            # SHORTCUT PATH - Instant response (no LLM, no agents)
-            # NEW in v3.2.0
-            # ========================================================
-            with tracer.start_as_current_span("handle_shortcut_path") as shortcut_span:
-                shortcut_span.set_attribute("query", query)
-                shortcut_span.set_attribute("response_type", "greeting_or_simple")
-                shortcut_span.set_attribute("cost_usd", 0.0)
-                shortcut_span.set_attribute("llm.calls", 0)
-                shortcut_span.set_attribute("agents.invoked", 0)
-                
+            # SHORTCUT PATH
+            with tracer.start_as_current_span("handle_shortcut_path"):
                 response_text = decision["shortcut_response"]
                 path_taken = "shortcut"
                 
                 metadata["shortcut_execution"] = {
                     "method": "pattern_matching",
                     "llm_calls": 0,
-                    "cost_usd": 0.0,
-                    "agents_invoked": 0
+                    "cost_usd": 0.0
                 }
                 
-                logger.info(f"⚡ SHORTCUT PATH executed")
-                logger.info(f"   Cost: $0.00")
-                logger.info(f"   LLM Calls: 0")
+                logger.info(f"Ã¢Å¡Â¡ SHORTCUT PATH executed")
         
         elif chosen_path == "mcp" and mcp_client and mcp_client._initialized:
-            # ========================================================
-            # MCP FAST PATH - Tool already selected by unified LLM!
-            # ========================================================
-            logger.info(f"🚀 MCP Fast Path:")
-            logger.info("   Using LangChain agent tool selection")
-            
-            try:
-                langchain_result = await try_langchain_mcp_resolution(
-                    query,
-                    conversation_id,
-                    request.user_id
-                )
+            # MCP FAST PATH
+            if "mcp_tool" not in decision or "mcp_parameters" not in decision:
+                # If MCP is explicitly forced from UI, choose a safe default MCP tool
+                # instead of immediately falling back to A2A.
+                if routing_mode == "mcp":
+                    query_lower = query.lower()
+                    route_id = None
+                    if "red" in query_lower:
+                        route_id = "Red"
+                    elif "orange" in query_lower:
+                        route_id = "Orange"
+                    elif "blue" in query_lower:
+                        route_id = "Blue"
+                    elif "green" in query_lower:
+                        route_id = "Green"
 
-                if langchain_result:
-                    response_text = langchain_result["response"]
-                    metadata["mcp_execution"] = {
-                        "success": True,
-                        "method": langchain_result["method"]
-                    }
+                    decision["mcp_tool"] = "mbta_get_alerts"
+                    decision["mcp_parameters"] = {"route_id": route_id} if route_id else {}
+                    logger.warning(
+                        f"MCP forced with no tool selected by classifier; auto-selected {decision['mcp_tool']} with {decision['mcp_parameters']}"
+                    )
                 else:
-                    raise RuntimeError("LangChain MCP agent did not return a response")
+                    logger.warning("MCP selected/forced but no tool selected; falling back to A2A")
+                    response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
+                    path_taken = "a2a_fallback"
+                    metadata.update(a2a_metadata)
+                    metadata["mcp_error"] = "No MCP tool selected"
+                    metadata["fallback_reason"] = "No MCP tool selected"
+                    logger.info("↪ Fallback to A2A completed")
+                    # Skip MCP execution branch.
+                    tool_name = None
+                    tool_params = None
+
+            if "mcp_tool" in decision and "mcp_parameters" in decision:
+                tool_name = decision["mcp_tool"]
+                tool_params = decision["mcp_parameters"]
+            else:
+                tool_name = None
+                tool_params = None
+
+            if tool_name is not None:
+                logger.info(f"🚀 MCP Fast Path:")
+                logger.info(f"   Tool: {tool_name}")
+                logger.info(f"   Parameters: {tool_params}")
+            
+                try:
+                    tool_result = await call_mcp_tool_dynamic(tool_name, tool_params)
                 
-                path_taken = "mcp"
-                logger.info(f"✅ MCP execution successful")
+                    metadata["mcp_execution"] = {
+                        "tool": tool_name,
+                        "parameters": tool_params,
+                        "success": True
+                    }
                 
-            except Exception as e:
-                logger.error(f"❌ MCP execution failed: {e}")
-                root_span.record_exception(e)
+                    response_text = await synthesize_mcp_response_with_llm(query, tool_name, tool_result)
                 
-                # Fallback to A2A
-                logger.info("↪️  Falling back to A2A path")
-                response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
-                path_taken = "a2a_fallback"
-                metadata.update(a2a_metadata)
-                metadata["mcp_error"] = str(e)
+                    path_taken = "mcp"
+                    logger.info(f"✅ MCP execution successful")
+                
+                except Exception as e:
+                    logger.error(f"❌ MCP execution failed: {e}")
+                    root_span.record_exception(e)
+                
+                    logger.info("↪️  Falling back to A2A path")
+                    response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
+                    path_taken = "a2a_fallback"
+                    metadata.update(a2a_metadata)
+                    metadata["mcp_error"] = str(e)
         
         elif chosen_path == "a2a":
-            # ========================================================
             # A2A MULTI AGENT PATH
-            # ========================================================
-            logger.info(f"🔄 A2A Path: {decision['reasoning']}")
+            logger.info(f"Ã°Å¸â€â€ž A2A Path: {decision['reasoning']}")
+            
+            if needs_expertise:
+                logger.info(f"   Ã°Å¸Â§Â  Domain expertise will be used")
             
             response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
             path_taken = "a2a"
             metadata.update(a2a_metadata)
+            metadata["domain_expertise_used"] = needs_expertise
         
         else:
-            # MCP selected but client not available - fallback
-            logger.warning("MCP path selected but client not available - falling back to A2A")
+            # MCP selected but not available - fallback
+            logger.warning("MCP selected but unavailable - fallback to A2A")
             response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
             path_taken = "a2a_fallback"
             metadata.update(a2a_metadata)
-            metadata["fallback_reason"] = "MCP client not available"
+            metadata["fallback_reason"] = "MCP unavailable"
         
         # Calculate latency
         latency_ms = int((time.time() - start_time) * 1000)
         
-        # Add final span attributes
         root_span.set_attribute("path_taken", path_taken)
         root_span.set_attribute("latency_ms", latency_ms)
-        root_span.set_attribute("intent", intent)
-        root_span.set_attribute("confidence", confidence)
+        root_span.set_attribute("needs_expertise", needs_expertise)
         
-        logger.info(f"✅ Response generated via {path_taken} in {latency_ms}ms")
+        logger.info(f"Ã¢Å“â€¦ Response via {path_taken} in {latency_ms}ms")
         logger.info("=" * 80)
         
         # Log to ClickHouse: Assistant response
@@ -1004,13 +796,14 @@ async def chat_endpoint(request: ChatRequest):
                     conversation_id=conversation_id,
                     user_id=request.user_id,
                     role="assistant",
-                    content=response_text[:1000],  # Truncate if too long
+                    content=response_text[:1000],
                     intent=intent,
                     routed_to_orchestrator=(path_taken in ["a2a", "a2a_fallback"]),
                     metadata={
                         "path": path_taken,
                         "latency_ms": latency_ms,
-                        "confidence": confidence
+                        "confidence": confidence,
+                        "needs_expertise": needs_expertise
                     }
                 )
             except Exception as e:
@@ -1031,134 +824,60 @@ async def chat_endpoint(request: ChatRequest):
 # ============================================================================
 
 async def call_mcp_tool_dynamic(tool_name: str, parameters: Dict) -> Dict[str, Any]:
-    """
-    Dynamically call any MCP tool by name with given parameters
-    
-    Args:
-        tool_name: Name of the MCP tool to call
-        parameters: Dictionary of parameters to pass to the tool
-        
-    Returns:
-        Tool execution result as dictionary
-    """
+    """Dynamically call any MCP tool"""
     
     with tracer.start_as_current_span("call_mcp_tool_dynamic") as span:
         span.set_attribute("tool_name", tool_name)
         span.set_attribute("parameters", json.dumps(parameters))
+        
+        logger.info(f"Calling {tool_name} with params: {parameters}")
 
-        if not mcp_client or not mcp_client._initialized:
-            raise RuntimeError("MCP client is not initialized")
+        # Preferred path for current MCPClient implementation.
+        if hasattr(mcp_client, "call_tool"):
+            result = await mcp_client.call_tool(tool_name, parameters or {})
+        else:
+            # Backward compatibility for method-based clients.
+            tool_method_map = {
+                "mbta_get_alerts": "get_alerts",
+                "mbta_get_routes": "get_routes",
+                "mbta_get_stops": "get_stops",
+                "mbta_search_stops": "search_stops",
+                "mbta_get_predictions": "get_predictions",
+                "mbta_get_predictions_for_stop": "get_predictions_for_stop",
+                "mbta_get_schedules": "get_schedules",
+                "mbta_get_trips": "get_trips",
+                "mbta_get_vehicles": "get_vehicles",
+                "mbta_get_nearby_stops": "get_nearby_stops",
+                "mbta_plan_trip": "plan_trip",
+                "mbta_list_all_routes": "list_all_routes",
+                "mbta_list_all_stops": "list_all_stops",
+                "mbta_list_all_alerts": "list_all_alerts",
+            }
+            method_name = tool_method_map.get(tool_name)
+            if not method_name or not hasattr(mcp_client, method_name):
+                raise ValueError(f"Unknown MCP tool or unsupported MCP client method: {tool_name}")
+            method = getattr(mcp_client, method_name)
+            result = await method(**parameters)
 
-        if hasattr(mcp_client, "_available_tools") and mcp_client._available_tools:
-            available_names = {tool.name for tool in mcp_client._available_tools}
-            if tool_name not in available_names:
-                raise ValueError(f"Unknown MCP tool: {tool_name}")
-
-        normalized_params = _normalize_mcp_parameters(tool_name, parameters)
-
-        try:
-            logger.info(f"🔧 Calling {tool_name} with params: {normalized_params}")
-            result = await mcp_client.call_tool(tool_name, normalized_params)
-            span.set_attribute("success", True)
-            span.set_attribute("result_size", len(str(result)))
-            logger.info(f"✓ Tool execution successful")
-            return result
-
-        except Exception as e:
-            logger.error(f"Error calling {tool_name}: {e}", exc_info=True)
-            span.record_exception(e)
-            span.set_attribute("success", False)
-            raise
-
-
-def _normalize_mcp_parameters(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-    if tool_name != "mbta_plan_trip":
-        return parameters
-
-    normalized = dict(parameters)
-
-    if "from_location" not in normalized and "from" in normalized:
-        normalized["from_location"] = normalized.pop("from")
-
-    if "to_location" not in normalized and "to" in normalized:
-        normalized["to_location"] = normalized.pop("to")
-
-    def _parse_lat_lon(value: Optional[Any]) -> Optional[tuple[float, float]]:
-        if not isinstance(value, str):
-            return None
-        parts = [part.strip() for part in value.split(",")]
-        if len(parts) != 2:
-            return None
-        try:
-            return float(parts[0]), float(parts[1])
-        except ValueError:
-            return None
-
-    if "origin_lat" not in normalized or "origin_lon" not in normalized:
-        from_location = normalized.get("from_location")
-        coords = _parse_lat_lon(from_location)
-        if coords:
-            normalized.setdefault("origin_lat", coords[0])
-            normalized.setdefault("origin_lon", coords[1])
-
-    if "dest_lat" not in normalized or "dest_lon" not in normalized:
-        to_location = normalized.get("to_location")
-        coords = _parse_lat_lon(to_location)
-        if coords:
-            normalized.setdefault("dest_lat", coords[0])
-            normalized.setdefault("dest_lon", coords[1])
-
-    allowed_keys = {
-        "origin_lat",
-        "origin_lon",
-        "dest_lat",
-        "dest_lon",
-        "from_location",
-        "to_location",
-        "datetime",
-        "arrive_by"
-    }
-    return {key: value for key, value in normalized.items() if key in allowed_keys}
+        span.set_attribute("success", True)
+        logger.info("Tool execution successful")
+        
+        return result
 
 
 # ============================================================================
-# RESPONSE SYNTHESIS (NATURAL LANGUAGE GENERATION)
+# RESPONSE SYNTHESIS
 # ============================================================================
 
 async def synthesize_mcp_response_with_llm(query: str, tool_name: str, tool_result: Dict) -> str:
-    """
-    Convert MCP JSON response into natural, conversational language
-    
-    Args:
-        query: Original user query
-        tool_name: Name of the tool that was called
-        tool_result: JSON result from the MCP tool
-        
-    Returns:
-        Natural language response string
-    """
+    """Convert MCP JSON response into natural language"""
     
     system_prompt = """You are a helpful MBTA transit assistant.
 
 Convert the technical API response into a natural, conversational answer.
 
-Guidelines:
-- Be concise but informative
-- Use natural language, not technical jargon
-- Include relevant details (times, locations, routes)
-- If there's a lot of data, summarize the most important points
-- Be helpful and friendly
-- Format times in a readable way (e.g., "in 5 minutes" rather than timestamps)
+Be concise but informative. Use natural language, not technical jargon."""
 
-DO NOT include phrases like:
-- "Based on the data"
-- "According to the API"
-- "The response shows"
-- "Here is what I found"
-
-Just answer the question naturally as if you knew this information."""
-
-    # Truncate very large responses to avoid token limits
     tool_result_str = json.dumps(tool_result, indent=2)
     if len(tool_result_str) > 4000:
         tool_result_str = tool_result_str[:4000] + "\n... (truncated)"
@@ -1170,14 +889,10 @@ Tool Used: {tool_name}
 API Response:
 {tool_result_str}
 
-Convert this to a natural, helpful answer."""
+Convert to natural answer."""
 
     try:
-        with tracer.start_as_current_span("synthesize_mcp_response_with_llm") as span:
-            span.set_attribute("query", query)
-            span.set_attribute("tool_name", tool_name)
-            span.set_attribute("result_size", len(tool_result_str))
-            
+        with tracer.start_as_current_span("synthesize_response"):
             response = await asyncio.to_thread(
                 openai_client.chat.completions.create,
                 model="gpt-4o-mini",
@@ -1189,54 +904,36 @@ Convert this to a natural, helpful answer."""
                 max_tokens=500
             )
             
-            synthesized_response = response.choices[0].message.content.strip()
-            span.set_attribute("response_length", len(synthesized_response))
-            
-            logger.info(f"✓ Response synthesized ({len(synthesized_response)} chars)")
-            
-            return synthesized_response
-            
+            return response.choices[0].message.content.strip()
+    
     except Exception as e:
-        logger.error(f"Response synthesis failed: {e}", exc_info=True)
-        # Fallback to basic response
-        return f"I found information about your query, but had trouble formatting it. Raw data: {str(tool_result)[:200]}..."
+        logger.error(f"Synthesis failed: {e}")
+        return f"I found information but had trouble formatting it: {str(tool_result)[:200]}..."
 
 
 # ============================================================================
-# A2A PATH HANDLER (STATEGRAPH ORCHESTRATION)
+# A2A PATH HANDLER
 # ============================================================================
 
 async def handle_a2a_path(query: str, conversation_id: str) -> tuple[str, Dict[str, Any]]:
-    """
-    Handle query using A2A agent orchestration via StateGraph
-    FULLY INSTRUMENTED with tracing
-    
-    Args:
-        query: User's query
-        conversation_id: Unique conversation identifier
-        
-    Returns:
-        Tuple of (response_text, metadata)
-    """
+    """Handle query using A2A agents with domain expertise"""
     
     with tracer.start_as_current_span("handle_a2a_path") as span:
         span.set_attribute("query", query)
         span.set_attribute("conversation_id", conversation_id)
         
         if not stategraph_orchestrator:
-            logger.error("StateGraph orchestrator not available")
+            logger.error("StateGraph unavailable")
             return (
-                "I'm having trouble processing your request right now. Please try again.",
-                {"error": "StateGraph orchestrator not available"}
+                "I'm having trouble processing your request. Please try again.",
+                {"error": "StateGraph unavailable"}
             )
         
         try:
-            # Call StateGraph orchestrator
-            logger.info(f"🔄 Running StateGraph orchestration")
+            logger.info(f"Ã°Å¸â€â€ž Running StateGraph orchestration")
             
             result = await stategraph_orchestrator.process_message(query, conversation_id)
             
-            # Extract response and metadata from StateGraph result
             response_text = result.get("response", "")
             
             metadata = {
@@ -1246,32 +943,27 @@ async def handle_a2a_path(query: str, conversation_id: str) -> tuple[str, Dict[s
                 "graph_execution": result.get("metadata", {}).get("graph_execution", "completed")
             }
             
-            # Add span attributes
             span.set_attribute("agents_called", json.dumps(metadata['agents_called']))
             span.set_attribute("agents_count", len(metadata['agents_called']))
-            span.set_attribute("response_length", len(response_text))
             
-            logger.info(f"✓ StateGraph completed")
-            logger.info(f"   Agents called: {', '.join(metadata['agents_called'])}")
+            logger.info(f"Ã¢Å“â€œ StateGraph completed")
+            logger.info(f"   Agents: {', '.join(metadata['agents_called'])}")
             
             return response_text, metadata
-            
+        
         except Exception as e:
-            logger.error(f"Error in A2A path: {e}", exc_info=True)
+            logger.error(f"A2A error: {e}", exc_info=True)
             span.record_exception(e)
-            return (
-                f"I encountered an error processing your request: {str(e)}",
-                {"error": str(e)}
-            )
+            return (f"Error: {str(e)}", {"error": str(e)})
 
 
 # ============================================================================
-# ADDITIONAL ENDPOINTS
+# HEALTH & METRICS
 # ============================================================================
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check endpoint"""
+    """Detailed health check"""
     return {
         "status": "healthy",
         "timestamp": time.time(),
@@ -1286,6 +978,10 @@ async def health_check():
             },
             "clickhouse": {
                 "available": clickhouse_logger is not None
+            },
+            "routing": {
+                "method": "expertise_based",
+                "version": "4.0"
             }
         }
     }
@@ -1293,7 +989,7 @@ async def health_check():
 
 @app.get("/metrics")
 async def get_metrics():
-    """Basic metrics endpoint"""
+    """Metrics endpoint"""
     tools_available = []
     if mcp_client and hasattr(mcp_client, '_available_tools'):
         tools_available = [tool.name for tool in mcp_client._available_tools]
@@ -1302,28 +998,37 @@ async def get_metrics():
         "mcp_tools_available": len(tools_available),
         "mcp_tools": tools_available,
         "stategraph_available": stategraph_orchestrator is not None,
-        "optimization": "unified_llm_routing_with_shortcut",  # Updated
+        "version": "4.0.0",
+        "routing_method": "expertise_based",
+        "routing_criteria": {
+            "mcp": "Simple fact lookups (API wrappers sufficient)",
+            "a2a": "Queries needing domain expertise (predictions, recommendations, analysis)"
+        },
+        "expertise_detection": {
+            "predictive": ["should i wait", "how long will", "when will"],
+            "decision_support": ["should i", "recommend", "suggest", "better to"],
+            "conditional": ["if", "considering", "depending on"],
+            "analytical": ["why", "explain", "what caused", "how serious"],
+            "multi_step": ["from X to Y", "route considering", "check then"]
+        },
         "llm_calls_per_request": {
-            "shortcut_path": 0,  # NEW - no LLM calls
+            "shortcut_path": 0,
             "mcp_path": 2,  # 1 unified + 1 synthesis
             "a2a_path": 1,  # 1 unified only
         }
     }
 
 
-# ============================================================================
-# RUN SERVER
-# ============================================================================
-
 if __name__ == "__main__":
     import uvicorn
     
     logger.info("=" * 80)
-    logger.info("🚀 Starting MBTA Exchange Agent Server")
-    logger.info("   Version: 3.1.0")
-    logger.info("   Optimization: Unified LLM Routing")
-    logger.info("   Cost Reduction: ~33%")
-    logger.info("   Latency Improvement: ~200ms")
+    logger.info("Ã°Å¸Å¡â‚¬ Starting MBTA Exchange Agent Server")
+    logger.info("   Version: 4.0.0")
+    logger.info("   Routing: Intelligent Expertise-Based")
+    logger.info("   Logic: Routes based on domain expertise needs")
     logger.info("=" * 80)
     
     uvicorn.run(app, host="0.0.0.0", port=8100)
+
+

@@ -312,6 +312,39 @@ async def get_ui():
             padding-bottom: 10px;
             border-bottom: 2px solid #667eea;
         }
+
+        .routing-switch {
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px;
+            margin-bottom: 16px;
+        }
+
+        .routing-switch-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: #334155;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .routing-options {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .routing-option {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #334155;
+            cursor: pointer;
+            user-select: none;
+        }
         
         .system-card {
             background: white;
@@ -565,6 +598,27 @@ async def get_ui():
         <!-- System Visibility Panel -->
         <div class="system-panel">
             <div class="system-header">⚙️ System Internals</div>
+            <div class="routing-switch">
+                <div class="routing-switch-title">Decision Path</div>
+                <div class="routing-options">
+                    <label class="routing-option">
+                        <input type="radio" name="routingMode" value="auto" checked />
+                        Auto
+                    </label>
+                    <label class="routing-option">
+                        <input type="radio" name="routingMode" value="shortcut" />
+                        Shortcut
+                    </label>
+                    <label class="routing-option">
+                        <input type="radio" name="routingMode" value="mcp" />
+                        MCP
+                    </label>
+                    <label class="routing-option">
+                        <input type="radio" name="routingMode" value="a2a" />
+                        A2A
+                    </label>
+                </div>
+            </div>
             <div id="systemLog"></div>
         </div>
     </div>
@@ -657,10 +711,16 @@ async def get_ui():
                 addMessage('assistant', '❌ ' + data.error, {error: true});
             }
         }
+
+        function getSelectedRoutingMode() {
+            const selected = document.querySelector('input[name="routingMode"]:checked');
+            return selected ? selected.value : 'auto';
+        }
         
         function sendMessage() {
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
+            const routingMode = getSelectedRoutingMode();
             
             if (message && ws.readyState === WebSocket.OPEN) {
                 addMessage('user', message);
@@ -669,12 +729,14 @@ async def get_ui():
                 // Add system log for user query
                 addSystemLog('input', 'User query received', {
                     query: message,
-                    length: message.length
+                    length: message.length,
+                    routing_mode: routingMode
                 });
                 
                 ws.send(JSON.stringify({
                     message: message,
-                    conversation_id: conversationId
+                    conversation_id: conversationId,
+                    routing_mode: routingMode
                 }));
                 
                 input.value = '';
@@ -717,8 +779,16 @@ async def get_ui():
             let icon = '📊';
             
             if (category === 'routing') {
-                badgeClass += details.path === 'mcp' ? ' mcp' : ' a2a';
-                icon = details.path === 'mcp' ? '⚡' : '🔄';
+                if (details.path === 'mcp') {
+                    badgeClass += ' mcp';
+                    icon = '⚡';
+                } else if (details.path === 'shortcut') {
+                    badgeClass += ' success';
+                    icon = '🧮';
+                } else {
+                    badgeClass += ' a2a';
+                    icon = '🔄';
+                }
             } else if (category === 'agents') {
                 badgeClass += ' success';
                 icon = '🤖';
@@ -741,8 +811,9 @@ async def get_ui():
                         <strong>Intent:</strong> ${details.intent || 'unknown'}
                     </div>
                     <div class="system-detail">
-                        <strong>Path:</strong> ${details.path === 'mcp' ? 'MCP Fast Path' : 'A2A Agents'}
+                        <strong>Path:</strong> ${details.path === 'shortcut' ? 'Regex Shortcut' : details.path === 'mcp' ? 'MCP Fast Path' : 'A2A Agents'}
                     </div>
+                    ${details.routing_mode && details.routing_mode !== 'auto' ? `<div class="system-detail"><strong>Forced Mode:</strong> ${details.routing_mode.toUpperCase()}</div>` : ''}
                     ${details.confidence ? `<div class="system-detail"><strong>Confidence:</strong> ${(details.confidence * 100).toFixed(0)}%</div>` : ''}
                     ${details.latency ? `<div class="system-detail"><strong>Latency:</strong> ${details.latency}ms</div>` : ''}
                 `;
@@ -769,6 +840,7 @@ async def get_ui():
                 html += `
                     <div class="system-detail">"${details.query}"</div>
                     <div class="system-detail"><strong>Length:</strong> ${details.length} characters</div>
+                    ${details.routing_mode ? `<div class="system-detail"><strong>Selected Mode:</strong> ${details.routing_mode.toUpperCase()}</div>` : ''}
                 `;
             }
             
@@ -818,6 +890,7 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             message = data.get('message', '')
             conversation_id = data.get('conversation_id')
+            routing_mode = data.get('routing_mode', 'auto')
             
             # Call Exchange Agent
             async with httpx.AsyncClient() as client:
@@ -826,7 +899,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         f"{EXCHANGE_AGENT_URL}/chat",
                         json={
                             'query': message,
-                            'conversation_id': conversation_id
+                            'conversation_id': conversation_id,
+                            'routing_mode': routing_mode
                         },
                         timeout=30.0
                     )
@@ -842,7 +916,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             'intent': result.get('intent', 'unknown'),
                             'confidence': result.get('confidence', 0.0),
                             'path': result.get('path', 'unknown'),
-                            'latency': result.get('latency_ms', 0)
+                            'latency': result.get('latency_ms', 0),
+                            'routing_mode': (
+                                result.get('metadata', {})
+                                .get('unified_decision', {})
+                                .get('routing_mode', routing_mode)
+                            )
                         }
                     }, websocket)
                     

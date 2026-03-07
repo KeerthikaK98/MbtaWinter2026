@@ -4,6 +4,7 @@ Calls agents via SLIM transport using agntcy-app-sdk
 """
 
 import logging
+import os
 from typing import Dict, Any
 from agntcy_app_sdk.factory import AgntcyFactory
 
@@ -17,6 +18,9 @@ class SlimAgentClient:
         self.factory = AgntcyFactory()
         self.clients: Dict[str, Any] = {}
         self._initialized = False
+        self.alerts_agent_url = os.getenv("ALERTS_AGENT_URL", "http://alerts-agent:50051").rstrip("/") + "/"
+        self.planner_agent_url = os.getenv("PLANNER_AGENT_URL", "http://planner-agent:50052").rstrip("/") + "/"
+        self.stopfinder_agent_url = os.getenv("STOPFINDER_AGENT_URL", "http://stopfinder-agent:50053").rstrip("/") + "/"
         
     async def initialize(self):
         """Initialize SLIM clients for all agents"""
@@ -28,19 +32,19 @@ class SlimAgentClient:
             
             self.clients["alerts"] = await self.factory.create_client(
                 protocol="A2A",
-                agent_url="http://96.126.111.107:50051/"
+                agent_url=self.alerts_agent_url
             )
             logger.info("✅ Alerts SLIM client ready")
             
             self.clients["planner"] = await self.factory.create_client(
                 protocol="A2A",
-                agent_url="http://96.126.111.107:50052/"
+                agent_url=self.planner_agent_url
             )
             logger.info("✅ Planner SLIM client ready")
             
             self.clients["stopfinder"] = await self.factory.create_client(
                 protocol="A2A",
-                agent_url="http://96.126.111.107:50053/"
+                agent_url=self.stopfinder_agent_url
             )
             logger.info("✅ StopFinder SLIM client ready")
             
