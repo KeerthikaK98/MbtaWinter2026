@@ -61,7 +61,7 @@ async def get_ui():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MBTA Agntcy</title>
+    <title>MBTA Winter 2026 🎄 </title>
     <style>
         * {
             margin: 0;
@@ -675,7 +675,7 @@ async def get_ui():
             ws = new WebSocket(`ws://${window.location.host}/ws`);
             
             ws.onopen = () => {
-                console.log('Connected to MBTA Agntcy');
+                console.log('Connected to MBTA Winter 2026 🎄');
                 addSystemLog('system', 'WebSocket connected', {status: 'active'});
             };
             

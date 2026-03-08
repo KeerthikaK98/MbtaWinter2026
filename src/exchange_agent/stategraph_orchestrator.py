@@ -712,6 +712,8 @@ Plan the route between these stations."""
                             result = await call_agent_http(config, agent_query, state["conversation_id"])
                     else:
                         result = await call_agent_http(config, agent_query, state["conversation_id"])
+                    # Normalize agent id on every response for stable synthesis mapping.
+                    result["agent_used"] = agent_id
                     
                     resp_text = result.get("response", "")
                     
@@ -781,7 +783,12 @@ async def synthesize_node(state: AgentState) -> AgentState:
                 return {**state, "final_response": "Hello! I help with MBTA routes, alerts, and stops.", "should_end": True}
             return {**state, "final_response": "I specialize in MBTA transit.", "should_end": True}
         
-        responses = [r.get("response", "") for r in state.get("agent_responses", []) if not r.get('error') and r.get("response")]
+        agent_responses = [r for r in state.get("agent_responses", []) if not r.get("error") and r.get("response")]
+        responses = [r.get("response", "") for r in agent_responses]
+        response_by_agent = {
+            str(r.get("agent_used", "")).lower(): r.get("response", "")
+            for r in agent_responses
+        }
         
         if not responses:
             return {**state, "final_response": "Agents unavailable.", "should_end": True}
@@ -807,19 +814,8 @@ async def synthesize_node(state: AgentState) -> AgentState:
             has_planner = any("planner" in a.lower() for a in agents_called_list)
             
             if has_alerts and has_planner:
-                alerts_resp = ""
-                planner_resp = ""
-                
-                for idx, agent_id in enumerate(agents_called_list):
-                    if idx < len(responses):
-                        resp = responses[idx]
-                        if isinstance(resp, dict):
-                            resp = resp.get("response", "")
-                        
-                        if "alert" in agent_id.lower():
-                            alerts_resp = resp
-                        elif "planner" in agent_id.lower():
-                            planner_resp = resp
+                alerts_resp = next((txt for aid, txt in response_by_agent.items() if "alert" in aid), "")
+                planner_resp = next((txt for aid, txt in response_by_agent.items() if "planner" in aid), "")
                 
                 # Check if no real issues
                 alerts_lower = alerts_resp.lower() if alerts_resp else ""
@@ -840,17 +836,7 @@ async def synthesize_node(state: AgentState) -> AgentState:
         routing = state.get("routing_decision", "")
         
         if routing == "FULL_CHAIN":
-            planner_resp = ""
-            
-            for idx, agent_id in enumerate(agents_called_list):
-                if idx < len(responses):
-                    resp = responses[idx]
-                    if isinstance(resp, dict):
-                        resp = resp.get("response", "")
-                    
-                    if "planner" in agent_id.lower():
-                        planner_resp = resp
-                        break
+            planner_resp = next((txt for aid, txt in response_by_agent.items() if "planner" in aid), "")
             
             # Check if multiple routes requested
             user_msg = state.get("user_message", "").lower()

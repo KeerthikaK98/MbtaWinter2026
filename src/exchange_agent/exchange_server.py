@@ -1,5 +1,6 @@
 ﻿# src/exchange_agent/exchange_server.py
 
+
 """
 Exchange Agent - Hybrid A2A + MCP Orchestrator
 Version 4.0 - Intelligent Expertise-Based Routing
@@ -595,10 +596,38 @@ Analyze and provide routing decision."""
             }
 
 
+def infer_intent_fast(query: str) -> str:
+    """Cheap intent inference for forced modes (no auto routing)."""
+    q = (query or "").lower()
+    if re.search(r"\bfrom\b.+\bto\b", q) or any(w in q for w in ["route", "directions", "trip", "get to"]):
+        return "trip_planning"
+    if any(w in q for w in ["station", "stop", "nearest"]):
+        return "stops"
+    if any(w in q for w in ["alert", "delay", "disruption", "service"]):
+        return "alerts"
+    if is_greeting_or_simple_query(query):
+        return "greeting"
+    return "general"
+
+
 async def select_mcp_tool_forced(query: str, available_tools: List[Dict]) -> Dict[str, Any]:
     """Best-effort MCP tool selection for forced MCP mode."""
     if not available_tools:
         return {}
+
+    q = (query or "").lower()
+    tool_names = {t["name"] for t in available_tools}
+
+    # Deterministic handling for crowding queries in forced MCP mode.
+    if any(k in q for k in ["crowded", "crowding", "busy", "packed", "occupancy", "full"]):
+        route_map = {"red": "Red", "orange": "Orange", "blue": "Blue", "green": "Green-B"}
+        route_id = next((rid for key, rid in route_map.items() if key in q), None)
+        if "mbta_get_vehicles" in tool_names:
+            params = {"route_id": route_id} if route_id else {}
+            return {"mcp_tool": "mbta_get_vehicles", "mcp_parameters": params}
+        if "mbta_get_alerts" in tool_names:
+            params = {"route_id": route_id} if route_id else {}
+            return {"mcp_tool": "mbta_get_alerts", "mcp_parameters": params}
 
     tools_list = "\n".join([f"- {t['name']}: {t.get('description', '')}" for t in available_tools])
     prompt = f"""Select the single best MCP tool for this user query.
@@ -691,35 +720,57 @@ async def chat_endpoint(request: ChatRequest):
         # ====================================================================
         
         with tracer.start_as_current_span("expertise_based_routing") as routing_span:
-            # Analyze if query needs domain expertise (keyword-based)
-            needs_expertise, expertise_reasoning, detected_patterns = needs_domain_expertise(query)
-            
-            routing_span.set_attribute("needs_expertise", needs_expertise)
-            routing_span.set_attribute("reasoning", expertise_reasoning)
-            routing_span.set_attribute("detected_patterns", str(detected_patterns))
-            
-            logger.info(f"🧠 EXPERTISE ANALYSIS:")
-            logger.info(f"   Needs expertise: {needs_expertise}")
-            logger.info(f"   Reasoning: {expertise_reasoning}")
-            logger.info(f"   Patterns detected: {detected_patterns}")
-            
-            # Still use unified LLM for intent classification and tool selection
-            decision = await classify_route_and_select_tool(query, available_tools)
-
+            # Forced MCP mode must bypass auto/A2A routing logic entirely.
             if routing_mode == "mcp":
-                decision["path"] = "mcp"
-                decision["reasoning"] = "Forced via UI routing_mode=mcp"
-                decision["confidence"] = 1.0
-                if "mcp_tool" not in decision or "mcp_parameters" not in decision:
-                    forced_tool = await select_mcp_tool_forced(query, available_tools)
-                    if forced_tool:
-                        decision.update(forced_tool)
+                needs_expertise = False
+                expertise_reasoning = "Skipped in forced MCP mode"
+                detected_patterns = []
+                routing_span.set_attribute("needs_expertise", needs_expertise)
+                routing_span.set_attribute("reasoning", expertise_reasoning)
+                routing_span.set_attribute("detected_patterns", str(detected_patterns))
+                decision = {
+                    "intent": infer_intent_fast(query),
+                    "confidence": 1.0,
+                    "path": "mcp",
+                    "reasoning": "Forced via UI routing_mode=mcp",
+                    "complexity": 0.5,
+                    "llm_calls": 0
+                }
+                forced_tool = await select_mcp_tool_forced(query, available_tools)
+                if forced_tool:
+                    decision.update(forced_tool)
             elif routing_mode == "a2a":
-                decision["path"] = "a2a"
-                decision["reasoning"] = "Forced via UI routing_mode=a2a"
-                decision["confidence"] = 1.0
+                needs_expertise = False
+                expertise_reasoning = "Skipped in forced A2A mode"
+                detected_patterns = []
+                routing_span.set_attribute("needs_expertise", needs_expertise)
+                routing_span.set_attribute("reasoning", expertise_reasoning)
+                routing_span.set_attribute("detected_patterns", str(detected_patterns))
+                decision = {
+                    "intent": infer_intent_fast(query),
+                    "confidence": 1.0,
+                    "path": "a2a",
+                    "reasoning": "Forced via UI routing_mode=a2a",
+                    "complexity": 0.5,
+                    "llm_calls": 0
+                }
             else:
-                # OVERRIDE path based on expertise analysis (auto mode only)
+                # Analyze if query needs domain expertise (keyword-based)
+                needs_expertise, expertise_reasoning, detected_patterns = needs_domain_expertise(query)
+                
+                routing_span.set_attribute("needs_expertise", needs_expertise)
+                routing_span.set_attribute("reasoning", expertise_reasoning)
+                routing_span.set_attribute("detected_patterns", str(detected_patterns))
+                
+                logger.info(f"🧠 EXPERTISE ANALYSIS:")
+                logger.info(f"   Needs expertise: {needs_expertise}")
+                logger.info(f"   Reasoning: {expertise_reasoning}")
+                logger.info(f"   Patterns detected: {detected_patterns}")
+                
+                # Auto mode uses original logic.
+                decision = await classify_route_and_select_tool(query, available_tools)
+                
+                # OVERRIDE path based on expertise analysis
                 if needs_expertise:
                     original_path = decision["path"]
                     decision["path"] = "a2a"
@@ -802,24 +853,12 @@ async def chat_endpoint(request: ChatRequest):
         
         elif chosen_path == "mcp" and mcp_client and mcp_client._initialized:
             # MCP FAST PATH
-            if "mcp_tool" not in decision or "mcp_parameters" not in decision:
-                forced_tool = await select_mcp_tool_forced(query, available_tools)
-                if forced_tool:
-                    decision.update(forced_tool)
-                else:
-                    logger.warning("MCP selected but no tool selected - fallback to A2A")
-                    response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
-                    path_taken = "a2a_fallback"
-                    metadata.update(a2a_metadata)
-                    metadata["fallback_reason"] = "No MCP tool selected"
-                    metadata["mcp_error"] = "No MCP tool selected"
-                    tool_name = None
-                    tool_params = None
-            
-            if "mcp_tool" in decision and "mcp_parameters" in decision:
-                tool_name = decision['mcp_tool']
-                tool_params = decision['mcp_parameters']
-            else:
+            tool_name = decision.get("mcp_tool")
+            tool_params = decision.get("mcp_parameters", {})
+            if not tool_name:
+                response_text = "MCP mode selected, but no MCP tool was chosen. Try again."
+                path_taken = "mcp_error"
+                metadata["mcp_error"] = "No MCP tool selected"
                 tool_name = None
                 tool_params = None
             
@@ -827,29 +866,27 @@ async def chat_endpoint(request: ChatRequest):
                 logger.info(f"🚀 MCP Fast Path:")
                 logger.info(f"   Tool: {tool_name}")
                 logger.info(f"   Parameters: {tool_params}")
-            
+                
                 try:
                     tool_result = await call_mcp_tool_dynamic(tool_name, tool_params)
-                
+                    
                     metadata["mcp_execution"] = {
                         "tool": tool_name,
                         "parameters": tool_params,
                         "success": True
                     }
-                
+                    
+                    # Always return user-facing natural language while still using MCP tool output.
                     response_text = await synthesize_mcp_response_with_llm(query, tool_name, tool_result)
-                
+                    
                     path_taken = "mcp"
                     logger.info(f"✅ MCP execution successful")
-                
+                    
                 except Exception as e:
                     logger.error(f"❌ MCP execution failed: {e}")
                     root_span.record_exception(e)
-                
-                    logger.info("↪️  Falling back to A2A path")
-                    response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
-                    path_taken = "a2a_fallback"
-                    metadata.update(a2a_metadata)
+                    response_text = f"MCP request failed: {e}"
+                    path_taken = "mcp_error"
                     metadata["mcp_error"] = str(e)
         
         elif chosen_path == "a2a":
@@ -865,11 +902,10 @@ async def chat_endpoint(request: ChatRequest):
             metadata["domain_expertise_used"] = needs_expertise
         
         else:
-            # MCP selected but not available - fallback
-            logger.warning("MCP selected but unavailable - fallback to A2A")
-            response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
-            path_taken = "a2a_fallback"
-            metadata.update(a2a_metadata)
+            # MCP selected but unavailable
+            logger.warning("MCP selected but unavailable")
+            response_text = "MCP path selected, but MCP client is unavailable right now."
+            path_taken = "mcp_unavailable"
             metadata["fallback_reason"] = "MCP unavailable"
         
         # Calculate latency
@@ -891,7 +927,7 @@ async def chat_endpoint(request: ChatRequest):
                     role="assistant",
                     content=response_text[:1000],
                     intent=intent,
-                    routed_to_orchestrator=(path_taken in ["a2a", "a2a_fallback"]),
+                    routed_to_orchestrator=(path_taken == "a2a"),
                     metadata={
                         "path": path_taken,
                         "latency_ms": latency_ms,
@@ -916,6 +952,102 @@ async def chat_endpoint(request: ChatRequest):
 # MCP TOOL EXECUTION (DYNAMIC DISPATCH)
 # ============================================================================
 
+def _extract_best_stop_coords(search_result: Dict[str, Any], query_text: str) -> Optional[Dict[str, float]]:
+    """Extract best-matching stop latitude/longitude from mbta_search_stops result."""
+    if not isinstance(search_result, dict):
+        return None
+    data = search_result.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+
+    q = (query_text or "").strip().lower()
+    q_tokens = [t for t in re.split(r"\s+", q) if t]
+    best = None
+    best_score = -1
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        attrs = item.get("attributes", {})
+        name = str(attrs.get("name", "")).strip()
+        name_lower = name.lower()
+        location_type = attrs.get("location_type")
+        lat = attrs.get("latitude")
+        lon = attrs.get("longitude")
+        if lat is None or lon is None:
+            continue
+
+        score = 0
+        if q and name_lower == q:
+            score += 100
+        if q and q in name_lower:
+            score += 30
+        if q_tokens:
+            score += sum(10 for tok in q_tokens if tok in name_lower)
+        # Prefer station-level stops when user asks for stations.
+        try:
+            if int(location_type) == 1:
+                score += 20
+        except Exception:
+            pass
+        if "station" in q:
+            if "station" in name_lower:
+                score += 30
+            else:
+                score -= 15
+
+        if score > best_score:
+            try:
+                best = {"lat": float(lat), "lon": float(lon), "name": name}
+                best_score = score
+            except Exception:
+                continue
+
+    return best
+
+
+async def _normalize_plan_trip_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensure mbta_plan_trip has required lat/lon fields.
+    Accepts UI-style parameters {'from': 'Kendall', 'to': 'South Station'}
+    and resolves them via mbta_search_stops.
+    """
+    params = dict(parameters or {})
+    required = {"origin_lat", "origin_lon", "destination_lat", "destination_lon"}
+    if required.issubset(params.keys()):
+        return params
+
+    origin_name = params.get("from") or params.get("origin")
+    destination_name = params.get("to") or params.get("destination")
+    if not origin_name or not destination_name:
+        return params
+
+    if not hasattr(mcp_client, "call_tool"):
+        return params
+
+    origin_search = await mcp_client.call_tool("mbta_search_stops", {"query": str(origin_name)})
+    dest_search = await mcp_client.call_tool("mbta_search_stops", {"query": str(destination_name)})
+
+    origin_coords = _extract_best_stop_coords(origin_search, str(origin_name))
+    dest_coords = _extract_best_stop_coords(dest_search, str(destination_name))
+    if not origin_coords or not dest_coords:
+        return params
+
+    params["origin_lat"] = origin_coords["lat"]
+    params["origin_lon"] = origin_coords["lon"]
+    # mbta-mcp plan_trip expects dest_lat/dest_lon
+    params["dest_lat"] = dest_coords["lat"]
+    params["dest_lon"] = dest_coords["lon"]
+    # Keep destination_* aliases for compatibility.
+    params["destination_lat"] = dest_coords["lat"]
+    params["destination_lon"] = dest_coords["lon"]
+
+    # Keep original text for traceability if tool ignores unknown fields.
+    params.setdefault("origin_name", origin_coords.get("name") or str(origin_name))
+    params.setdefault("destination_name", dest_coords.get("name") or str(destination_name))
+    return params
+
+
 async def call_mcp_tool_dynamic(tool_name: str, parameters: Dict) -> Dict[str, Any]:
     """Dynamically call any MCP tool"""
     
@@ -923,9 +1055,12 @@ async def call_mcp_tool_dynamic(tool_name: str, parameters: Dict) -> Dict[str, A
         span.set_attribute("tool_name", tool_name)
         span.set_attribute("parameters", json.dumps(parameters))
 
+        if tool_name == "mbta_plan_trip":
+            parameters = await _normalize_plan_trip_parameters(parameters)
+
         logger.info(f"🔧 Calling {tool_name} with params: {parameters}")
 
-        # Preferred path: generic MCP dispatch from current MCPClient implementation.
+        # Preferred path for current MCPClient implementation.
         if hasattr(mcp_client, "call_tool"):
             result = await mcp_client.call_tool(tool_name, parameters or {})
         else:
@@ -1004,6 +1139,19 @@ Convert to natural answer."""
     except Exception as e:
         logger.error(f"Synthesis failed: {e}")
         return f"I found information but had trouble formatting it: {str(tool_result)[:200]}..."
+
+
+def format_mcp_response_raw(tool_result: Dict[str, Any]) -> str:
+    """Return MCP tool output without LLM refinement."""
+    if tool_result is None:
+        return ""
+    if isinstance(tool_result, str):
+        return tool_result
+    # Preserve exact structure for transparency.
+    try:
+        return json.dumps(tool_result, indent=2, ensure_ascii=False)
+    except Exception:
+        return str(tool_result)
 
 
 # ============================================================================
@@ -1125,3 +1273,4 @@ if __name__ == "__main__":
     logger.info("=" * 80)
     
     uvicorn.run(app, host="0.0.0.0", port=8100)
+
