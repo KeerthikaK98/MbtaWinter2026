@@ -1,4 +1,3 @@
-﻿
 # src/frontend/chat_server.py
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -6,7 +5,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
-import os
 import httpx
 import json
 import logging
@@ -27,8 +25,7 @@ app.add_middleware(
 )
 
 # Configuration
-# Use docker-compose service URL when provided; fallback supports local dev.
-EXCHANGE_AGENT_URL = os.getenv("EXCHANGE_AGENT_URL", "http://localhost:8100")
+EXCHANGE_AGENT_URL = "http://localhost:8100"
 
 # Mount static files for images
 static_dir = Path(__file__).parent / "static"
@@ -64,7 +61,7 @@ async def get_ui():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MBTA Agntcy - Transit Intelligence</title>
+    <title>MBTA Agentcy - Transit Intelligence</title>
     <style>
         * {
             margin: 0;
@@ -107,16 +104,13 @@ async def get_ui():
             overflow: hidden;
             position: relative;
             z-index: 2;
-            min-height: 0;
         }
 
         /* Left Panel - Chat */
         .chat-panel {
-            display: grid;
-            grid-template-rows: auto minmax(0, 1fr) auto auto;
+            display: flex;
+            flex-direction: column;
             border-right: 1px solid #e0e0e0;
-            min-height: 0;
-            overflow: hidden;
         }
 
         .chat-header {
@@ -168,11 +162,10 @@ async def get_ui():
         }
 
         .messages-container {
+            flex: 1;
             overflow-y: auto;
             padding: 20px 30px;
             background: #f8f9fa;
-            min-height: 0;
-            overscroll-behavior: contain;
         }
 
         .message {
@@ -337,8 +330,6 @@ async def get_ui():
             color: #eee;
             display: flex;
             flex-direction: column;
-            min-height: 0;
-            overflow: hidden;
         }
 
         .internals-header {
@@ -383,8 +374,6 @@ async def get_ui():
             flex: 1;
             overflow-y: auto;
             padding: 20px;
-            min-height: 0;
-            overscroll-behavior: contain;
         }
 
         .info-block {
@@ -510,7 +499,7 @@ async def get_ui():
         <div class="chat-panel">
             <div class="chat-header">
                 <div class="header-left">
-                    <span>🚇 MBTA Agntcy</span>
+                    <span>🚇 MBTA Agentcy</span>
                     <span class="weather-indicator" id="weatherIcon">☁️</span>
                 </div>
                 <div class="connection-status">
@@ -522,7 +511,7 @@ async def get_ui():
             <div class="messages-container" id="messagesContainer">
                 <div class="message system">
                     <div class="message-content">
-                        Welcome to MBTA Agntcy! Ask about transit alerts, routes, or stations.
+                        Welcome to MBTA Agentcy! Ask about transit alerts, routes, or stations.
                     </div>
                 </div>
             </div>
@@ -685,6 +674,7 @@ async def get_ui():
             
             const weatherMap = {
                 'Clear': 'clear',
+                'ClearNight': 'clear',
                 'Clouds': 'cloudy',
                 'Rain': 'rain',
                 'Drizzle': 'rain',
@@ -710,6 +700,7 @@ async def get_ui():
                     particles.push(new Particle('cloud'));
                 }
             }
+            // Clear and ClearNight have no particles
         }
 
         function animateWeather() {
@@ -739,6 +730,14 @@ async def get_ui():
                 const temp = current.temp_F;
                 const feelsLike = current.FeelsLikeF;
                 
+                // Get astronomy data for day/night detection
+                const astronomy = data.weather[0].astronomy[0];
+                const sunrise = astronomy.sunrise;
+                const sunset = astronomy.sunset;
+                
+                // Check if it's nighttime
+                const isNight = isCurrentlyNight(sunrise, sunset);
+                
                 let condition = 'Clear';
                 if (weatherDesc.toLowerCase().includes('snow')) {
                     condition = 'Snow';
@@ -747,7 +746,7 @@ async def get_ui():
                 } else if (weatherDesc.toLowerCase().includes('cloud')) {
                     condition = 'Clouds';
                 } else if (weatherDesc.toLowerCase().includes('clear') || weatherDesc.toLowerCase().includes('sunny')) {
-                    condition = 'Clear';
+                    condition = isNight ? 'ClearNight' : 'Clear';
                 }
                 
                 currentWeather = {
@@ -755,7 +754,10 @@ async def get_ui():
                     description: weatherDesc,
                     temp: temp,
                     feelsLike: feelsLike,
-                    location: 'Boston, MA'
+                    location: 'Boston, MA',
+                    isNight: isNight,
+                    sunrise: sunrise,
+                    sunset: sunset
                 };
                 
                 updateWeatherDisplay();
@@ -768,9 +770,60 @@ async def get_ui():
                     description: 'Unable to fetch weather',
                     temp: '--',
                     feelsLike: '--',
-                    location: 'Boston, MA'
+                    location: 'Boston, MA',
+                    isNight: false
                 };
                 updateWeatherDisplay();
+            }
+        }
+        
+        function isCurrentlyNight(sunrise, sunset) {
+            /**
+             * Check if current time is nighttime
+             * sunrise/sunset format: "07:15 AM" or "06:45 PM"
+             */
+            try {
+                const now = new Date();
+                const currentMinutes = now.getHours() * 60 + now.getMinutes();
+                
+                // Parse sunrise
+                const sunriseMatch = sunrise.match(/(\d+):(\d+)\s*(AM|PM)/i);
+                let sunriseMinutes = 0;
+                if (sunriseMatch) {
+                    let hours = parseInt(sunriseMatch[1]);
+                    const minutes = parseInt(sunriseMatch[2]);
+                    const period = sunriseMatch[3].toUpperCase();
+                    
+                    if (period === 'PM' && hours !== 12) hours += 12;
+                    if (period === 'AM' && hours === 12) hours = 0;
+                    
+                    sunriseMinutes = hours * 60 + minutes;
+                }
+                
+                // Parse sunset
+                const sunsetMatch = sunset.match(/(\d+):(\d+)\s*(AM|PM)/i);
+                let sunsetMinutes = 0;
+                if (sunsetMatch) {
+                    let hours = parseInt(sunsetMatch[1]);
+                    const minutes = parseInt(sunsetMatch[2]);
+                    const period = sunsetMatch[3].toUpperCase();
+                    
+                    if (period === 'PM' && hours !== 12) hours += 12;
+                    if (period === 'AM' && hours === 12) hours = 0;
+                    
+                    sunsetMinutes = hours * 60 + minutes;
+                }
+                
+                // Check if current time is before sunrise or after sunset
+                const isNight = currentMinutes < sunriseMinutes || currentMinutes >= sunsetMinutes;
+                
+                console.log(`Time check: ${now.getHours()}:${now.getMinutes()} | Sunrise: ${sunrise} (${sunriseMinutes}min) | Sunset: ${sunset} (${sunsetMinutes}min) | Night: ${isNight}`);
+                
+                return isNight;
+                
+            } catch (error) {
+                console.error('Day/night detection failed:', error);
+                return false; // Default to daytime
             }
         }
 
@@ -779,6 +832,7 @@ async def get_ui():
 
             const iconMap = {
                 'Clear': '☀️',
+                'ClearNight': '🌙',
                 'Clouds': '☁️',
                 'Rain': '🌧️',
                 'Drizzle': '🌦️',
@@ -792,11 +846,21 @@ async def get_ui():
             const icon = iconMap[currentWeather.condition] || '☁️';
             document.getElementById('weatherIcon').textContent = icon;
 
+            // Add sunrise/sunset info if available
+            let timeInfo = '';
+            if (currentWeather.sunrise && currentWeather.sunset) {
+                if (currentWeather.isNight) {
+                    timeInfo = ` • 🌙 Night (sunrise at ${currentWeather.sunrise})`;
+                } else {
+                    timeInfo = ` • ☀️ Day (sunset at ${currentWeather.sunset})`;
+                }
+            }
+
             const weatherInfo = document.getElementById('weatherInfo');
             weatherInfo.innerHTML = `
                 <div class="weather-info-title">${icon} ${currentWeather.description}</div>
                 <div class="weather-info-detail">
-                    ${currentWeather.location} • ${currentWeather.temp}°F (feels like ${currentWeather.feelsLike}°F)
+                    ${currentWeather.location} • ${currentWeather.temp}°F (feels like ${currentWeather.feelsLike}°F)${timeInfo}
                 </div>
             `;
         }
@@ -940,14 +1004,10 @@ async def get_ui():
             const agents = metadata.agents_called || [];
             const manualOverride = unified.manual_override || false;
             const forceProtocol = unified.force_protocol || 'auto';
-            const fallbackReason = metadata.fallback_reason || metadata.mcp_error || null;
 
             let badgeClass = 'mcp';
             let badgeText = 'MCP';
-            if (path === 'a2a_fallback') {
-                badgeClass = 'fallback';
-                badgeText = 'A2A FALLBACK';
-            } else if (path === 'a2a') {
+            if (path === 'a2a' || path === 'a2a_fallback') {
                 badgeClass = 'a2a';
                 badgeText = 'A2A';
             } else if (path === 'shortcut') {
@@ -965,16 +1025,6 @@ async def get_ui():
                         ${manualOverride ? '<span class="badge override">🔧 MANUAL OVERRIDE</span>' : ''}
                     </div>
                 </div>
-
-                ${(manualOverride && forceProtocol === 'mcp' && (path === 'a2a' || path === 'a2a_fallback')) ? `
-                <div class="info-block">
-                    <div class="info-label">Forced MCP Result</div>
-                    <div class="info-value" style="color: #ffa07a;">
-                        MCP was not used for execution; request ran via ${path.toUpperCase()}.
-                        ${fallbackReason ? `<br>${fallbackReason}` : ''}
-                    </div>
-                </div>
-                ` : ''}
 
                 ${manualOverride ? `
                 <div class="info-block">
@@ -1057,11 +1107,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         'type': 'response',
                         'response': result['response'],
                         'conversation_id': conversation_id,
-                        'metadata': {
-                            **result.get('metadata', {}),
-                            'path': result.get('path'),
-                            'latency_ms': result.get('latency_ms')
-                        }
+                        'metadata': result.get('metadata', {})
                     }, websocket)
                     
                 except httpx.HTTPError as e:
