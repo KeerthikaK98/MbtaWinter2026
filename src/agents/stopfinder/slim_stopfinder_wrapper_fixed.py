@@ -327,7 +327,7 @@ def main():
     agent_card = AgentCard(
         name="mbta-stopfinder",
         description="MBTA stop finder with CRITICAL BUGFIX for StateGraph integration",
-        url="http://96.126.111.107:50053/",
+        url="http://stopfinder-agent:50053/",
         version="4.1.0",
         default_input_modes=["text"],
         default_output_modes=["text"],
