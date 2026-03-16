@@ -831,7 +831,7 @@ def main():
     agent_card = AgentCard(
         name="mbta-alerts",
         description="Complete MBTA alerts agent with crowding estimation, historical pattern analysis (41,970 incidents), and domain expertise",
-        url="http://96.126.111.107:50051/",
+        url="http://alerts-agent:50051/",
         version="7.0.0",
         default_input_modes=["text"],
         default_output_modes=["text"],
