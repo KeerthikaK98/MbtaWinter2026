@@ -2,7 +2,9 @@
 ## Hybrid Protocol Transit Intelligence System
 A Distributed multi-agent system serving Boston's MBTA network with intelligent MCP+A2A protocol orchestration via SLIM transport and NANDA Registry Federation
 
-<img width="1206" height="829" alt="image" src="https://github.com/user-attachments/assets/ec898cb6-2178-4caa-bd17-2ffba024e21d" />
+<img width="1147" height="796" alt="image" src="https://github.com/user-attachments/assets/e04f7bec-f0ec-476f-8426-8012c2aa757c" />
+
+" />
 
 ---
 
