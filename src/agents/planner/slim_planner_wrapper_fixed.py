@@ -890,7 +890,7 @@ def main():
     agent_card = AgentCard(
         name="mbta-planner",
         description="Complete MBTA route planner with context awareness, crowding intelligence, and multiple route generation",
-        url="http://96.126.111.107:50052/",
+        url="http://planner-agent:50052/",
         version="5.1.0",
         default_input_modes=["text"],
         default_output_modes=["text"],
