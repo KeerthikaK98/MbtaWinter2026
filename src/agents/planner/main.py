@@ -16,8 +16,9 @@ from openai import OpenAI
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 import sys
-import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+from src.exchange_agent.llm_client import LLMClientException
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -40,7 +41,7 @@ except Exception as e:
     log.warning(f"Could not instrument FastAPI: {e}")
 
 # MBTA API Configuration
-MBTA_API_KEY = os.getenv('MBTA_API_KEY', 'c845eff5ae504179bc9cfa69914059de')
+MBTA_API_KEY = os.getenv('MBTA_API_KEY', 'your api key')
 MBTA_BASE_URL = "https://api-v3.mbta.com"
 
 # OpenAI Configuration for LLM extraction
@@ -50,8 +51,16 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 if not MBTA_API_KEY:
     log.warning("MBTA_API_KEY not found in environment variables!")
 
-if not OPENAI_API_KEY:
-    log.warning("OPENAI_API_KEY not found - LLM extraction disabled!")
+# LLM Client
+try:
+    from src.exchange_agent.llm_client import get_llm_client
+    llm = get_llm_client()
+    log.info(f"✓ LLM provider: {llm.provider}")
+except LLMClientException as e:
+    log.critical(f"Failed to set up LLM provider: {e}")
+    sys.exit(1)
+except RuntimeError as e:
+    log.warning(f"Runtime error in LLM setup: {e}")
 
 # Pydantic models
 class A2AMessage(BaseModel):
@@ -570,4 +579,5 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8002"))
     log.info(f"Starting MBTA Planner Agent on port {port}")
     
+
     uvicorn.run(app, host="0.0.0.0", port=port)
