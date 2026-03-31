@@ -31,8 +31,11 @@ except ImportError:
 tracer = trace.get_tracer(__name__)
 logger = logging.getLogger(__name__)
 
+
+# 03.25 REGISTRY_URL is updated to switchboard endpoint
 # Configuration
-REGISTRY_URL = os.getenv("REGISTRY_URL", "http://registry:6900")
+REGISTRY_URL = os.getenv("REGISTRY_URL", "http://45.56.102.83:6900")
+NEU_REGISTRY_URL = os.getenv("NEU_REGISTRY_URL", "http://97.107.132.213:6900")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # Caching
@@ -260,50 +263,113 @@ def extract_alerts_domain_analysis(alerts_response: str) -> Dict[str, Any]:
 # REGISTRY
 # ============================================================================
 
+# 03.25 added fallback to NEU Registry when switchboard is down
+    
 async def validate_registry() -> bool:
+    """Validate Switchboard connection, fall back to NEU registry"""
+    # Try Switchboard first
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(f"{REGISTRY_URL}/health")
-            return r.status_code == 200
+            if r.status_code == 200:
+                logger.info(f"✅ Switchboard accessible at {REGISTRY_URL}")
+                return True
     except:
-        return False
+        pass
+    
+    # Fallback to NEU registry directly
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{NEU_REGISTRY_URL}/health")
+            if r.status_code == 200:
+                logger.info(f"✅ NEU registry accessible at {NEU_REGISTRY_URL} (Switchboard down)")
+                return True
+    except:
+        pass
+    
+    return False
 
 
 async def get_agent_catalog() -> List[Dict]:
+    """
+    Fetch agents from Switchboard's federated endpoint (all registries),
+    with fallback to NEU registry if Switchboard is down.
+    """
     global _agent_catalog_cache, _catalog_cache_time
     
     if _agent_catalog_cache and _catalog_cache_time:
         if datetime.now() - _catalog_cache_time < _catalog_cache_ttl:
             return _agent_catalog_cache
     
+    import urllib.request as _ur, asyncio as _aio, json as _json
+    
+    # ================================================================
+    # PRIMARY: Fetch from Switchboard - /switchboard/agents
+    # ================================================================
     try:
-        import urllib.request as _ur, asyncio as _aio, json as _json
         _resp = await _aio.to_thread(
-            lambda: _json.loads(_ur.urlopen(f"{REGISTRY_URL}/list", timeout=10).read())
+            lambda: _json.loads(_ur.urlopen(f"{REGISTRY_URL}/switchboard/agents", timeout=10).read())
         )
-        agent_list = _resp
-
+        
+        # Handle response format
+        if isinstance(_resp, dict) and "agents" in _resp:
+            agents = _resp["agents"]
+        elif isinstance(_resp, list):
+            agents = _resp
+        else:
+            agents = []
+        
+        # Normalize field names (different registries use different formats)
+        normalized = []
+        for a in agents:
+            agent = dict(a)
+            if "agent_id" not in agent:
+                agent["agent_id"] = agent.get("agent_name") or agent.get("name", "unknown")
+            if "agent_url" not in agent:
+                agent["agent_url"] = agent.get("endpoint") or agent.get("api_url", "")
+            if "description" not in agent:
+                agent["description"] = ""
+            normalized.append(agent)
+        
+        _agent_catalog_cache = normalized
+        _catalog_cache_time = datetime.now()
+        logger.info(f"✓ Switchboard: {len(normalized)} agents from all registries")
+        return normalized
+        
+    except Exception as e:
+        logger.warning(f"Switchboard catalog failed: {e}")
+    
+    # ================================================================
+    # FALLBACK: Fetch from NEU registry directly
+    # ================================================================
+    try:
+        logger.info(f"↪️ Falling back to NEU registry: {NEU_REGISTRY_URL}")
+        
+        _resp = await _aio.to_thread(
+            lambda: _json.loads(_ur.urlopen(f"{NEU_REGISTRY_URL}/list", timeout=10).read())
+        )
+        
         agents = []
-        for aid in agent_list.keys():
+        for aid in _resp.keys():
             if aid == 'agent_status':
                 continue
             try:
                 _ar = await _aio.to_thread(
-                    lambda a=aid: _json.loads(_ur.urlopen(f"{REGISTRY_URL}/agents/{a}", timeout=10).read())
+                    lambda a=aid: _json.loads(_ur.urlopen(f"{NEU_REGISTRY_URL}/agents/{a}", timeout=10).read())
                 )
                 if _ar.get("alive") or _ar.get("status") == "alive" or True:
                     agents.append(_ar)
             except:
                 pass
-
+        
         _agent_catalog_cache = agents
         _catalog_cache_time = datetime.now()
-        logger.info(f"✓ Registry: {len(agents)} agents")
+        logger.info(f"NEU fallback: {len(agents)} agents")
         return agents
+        
     except Exception as e:
-        logger.error(f"Registry error: {e}")
+        logger.error(f"NEU fallback also failed: {e}")
         return []
-
 
 async def semantic_discovery(query: str) -> List[AgentConfig]:
     catalog = await get_agent_catalog()
@@ -312,15 +378,19 @@ async def semantic_discovery(query: str) -> List[AgentConfig]:
     
     descriptions = [f"• {a['agent_id']}: {a['description']}" for a in catalog]
     catalog_text = "\n".join(descriptions)
-    
+
+ # 03.25 Updated the prompt to include matching rules for Non-MBTA queries
     prompt = f"""Match query to the most relevant agents based on what the user actually needs.
+
 
 Query: "{query}"
 
-Available Agents:
+Available Agents (from all federated registries):
 {catalog_text}
 
 MATCHING RULES:
+
+MBTA Transit Queries:
 1. If query is ONLY about alerts/delays/disruptions (no routing) → ONLY alerts agent
    Examples: "Red Line delays?", "Should I wait?", "How long will delays last?", "Why delays?"
 
@@ -330,6 +400,14 @@ MATCHING RULES:
 3. If query asks about stops/stations (no routing) → ONLY stopfinder agent
    Examples: "Find Harvard station", "Stops on Red Line"
 
+Non-MBTA Queries:
+4. If query is NOT about transit, match any agent whose description fits the topic
+   Examples: "Weather in Boston?" → match a weather agent if available
+   "Latest news?" → match a news agent if available
+
+5. If NO agent's description matches the query topic → return empty list
+
+DO NOT match MBTA agents for non-transit queries.
 DO NOT match planner agent for queries that don't have explicit routing intent (from X to Y).
 DO NOT match planner for queries asking about delay duration, wait times, or disruption analysis.
 
@@ -417,6 +495,50 @@ async def call_agent_http(config: AgentConfig, msg: str, conv_id: str) -> Dict:
             return {"response": result["payload"].get("text", ""), "agent_used": config.name}
         return result
 
+# 03.25 Handling different endpoint formats
+
+async def call_agent_http(config: AgentConfig, msg: str, conv_id: str) -> Dict:
+    """
+    Call agent via HTTP. Tries A2A format first, then /chat format.
+    Handles agents from any registry (MBTA A2A agents, NEST agents, etc.)
+    """
+    # Try A2A message format first
+    a2a_url = f"{config.url}:{config.port}/a2a/message"
+    a2a_payload = {
+        "type": "request",
+        "payload": {"message": msg, "conversation_id": conv_id},
+        "metadata": {"source": "stategraph"}
+    }
+    
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            r = await client.post(a2a_url, json=a2a_payload)
+            r.raise_for_status()
+            result = r.json()
+            
+            if result.get("type") == "response" and "payload" in result:
+                return {"response": result["payload"].get("text", ""), "agent_used": config.name}
+            if "response" in result:
+                return {"response": result["response"], "agent_used": config.name}
+            return result
+        except Exception as a2a_error:
+            logger.info(f" A2A call failed for {config.name}: {a2a_error}, trying /chat")
+        
+        # Fallback: try /chat format (for non-A2A agents)
+        try:
+            chat_url = f"{config.url}:{config.port}/chat"
+            chat_payload = {"query": msg}
+            r = await client.post(chat_url, json=chat_payload)
+            r.raise_for_status()
+            result = r.json()
+            
+            response_text = result.get("response", "")
+            if response_text:
+                return {"response": response_text, "agent_used": config.name}
+            return {"response": json.dumps(result), "agent_used": config.name}
+        except Exception as chat_error:
+            logger.error(f" Both A2A and /chat failed for {config.name}: {chat_error}")
+            raise chat_error
 
 async def call_stopfinder_for_location(location: str, config: AgentConfig, conv_id: str) -> str:
     """Call StopFinder and extract station name"""
@@ -780,13 +902,15 @@ async def synthesize_node(state: AgentState) -> AgentState:
     3. Alerts + Planner (has issues) → Simple combination
     4. Full chain → Minimal synthesis or direct return
     """
+    # 03.25 Included fallback messages
     with tracer.start_as_current_span("synthesize"):
+        
         # Handle no agents
         if not state.get("matched_agents"):
             msg = state["user_message"].lower()
             if any(w in msg for w in ["hi", "hello", "hey"]):
-                return {**state, "final_response": "Hello! I help with MBTA routes, alerts, and stops.", "should_end": True}
-            return {**state, "final_response": "I specialize in MBTA transit.", "should_end": True}
+                return {**state, "final_response": "Hello! I can help with Boston MBTA transit and more. What do you need?", "should_end": True}
+            return {**state, "final_response": "I couldn't find an agent to answer that question. I am best at helping with Boston MBTA transit — try asking about delays, routes, stations, or crowding!", "should_end": True}
         
         agent_responses = [r for r in state.get("agent_responses", []) if not r.get("error") and r.get("response")]
         responses = [r.get("response", "") for r in agent_responses]
@@ -916,9 +1040,12 @@ def build_graph() -> StateGraph:
 # ORCHESTRATOR
 # ============================================================================
 
+# 03.25 Updated orchestrator version
 class StateGraphOrchestrator:
     """
-    Production Orchestrator v4.4 - Domain Expertise Coordination
+    Production Orchestrator v4.5 - Federated Discovery
+    - Switchboard-based federated discovery (NEST, NEU, AGNTCY)
+    - Fallback to NEU registry if Switchboard is down
     - Skips StopFinder for known stations
     - Extracts domain analysis from Alerts Agent
     - Passes alerts context to Planner Agent
@@ -929,11 +1056,13 @@ class StateGraphOrchestrator:
         global _current_orchestrator
         
         logger.info("=" * 80)
-        logger.info("🚀 StateGraph Orchestrator v4.4 - Domain Expert Coordination")
+        logger.info("🚀 StateGraph Orchestrator v4.5 - Federated Discovery")
+        logger.info(f"   📡 Switchboard: {REGISTRY_URL}")
+        logger.info(f"   📡 NEU fallback: {NEU_REGISTRY_URL}")
+        logger.info("   ✅ Federated discovery (NEST + NEU + AGNTCY)")
         logger.info("   ✅ Smart StopFinder skipping")
         logger.info("   ✅ Domain analysis extraction")
         logger.info("   ✅ Context passing between agents")
-        logger.info("   ✅ Registry discovery")
         logger.info("   ✅ SLIM transport")
         logger.info("=" * 80)
         
