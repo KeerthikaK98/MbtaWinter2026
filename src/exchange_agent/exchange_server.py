@@ -9,6 +9,7 @@ Forced MCP path uses the exact Smart MCP Only logic:
 - synthesize_response()
 
 Auto and A2A logic remain unchanged.
+
 """
 
 import sys
@@ -17,6 +18,9 @@ import os
 # Load environment variables FIRST (before any other imports)
 from dotenv import load_dotenv
 load_dotenv()
+
+# Switchboard URL 03.25
+SWITCHBOARD_URL = os.getenv("SWITCHBOARD_URL", "http://45.56.102.83:6900")
 
 # Initialize OpenTelemetry BEFORE other imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -44,6 +48,7 @@ import json
 import asyncio
 import random
 import re
+import httpx #03.25
 
 # Add parent directory to Python path for imports
 if __name__ == "__main__":
@@ -255,6 +260,7 @@ def is_greeting_or_simple_query(query: str) -> bool:
         for greeting in greeting_patterns
     )
 
+# 03.25 Updated shortcut responses
 
 def get_shortcut_response(query: str) -> str:
     """Generate response for shortcut path queries (NO LLM NEEDED)."""
@@ -263,13 +269,12 @@ def get_shortcut_response(query: str) -> str:
     greeting_keywords = ['hi', 'hello', 'hey', 'greetings']
     if any(keyword in query_lower for keyword in greeting_keywords):
         responses = [
-            "Hello! I'm MBTA Agentcy. Ask about service alerts, routes, or stations!",
-            "Hi! I can help with Boston MBTA transit info.",
+            "Hello! I'm MBTA Agentcy. Ask about service alerts, routes, stations, or anything else!",
+            "Hi! I can help with Boston MBTA transit and more.",
         ]
         return random.choice(responses)
 
-    return "I'm specialized in Boston MBTA transit..."
-
+    return "I can help with Boston MBTA transit and more. What do you need?"
 
 # ============================================================
 # INTELLIGENT EXPERTISE-BASED ROUTING
@@ -583,16 +588,17 @@ CRITICAL: Understand what counts as MBTA-related!
   ✅ "Route from X to Y", "How do I get to X?", "Best route to Y?"
   ✅ "Park St to Harvard?", "Get me from X to Y", "Directions to MIT?"
 
-**"general"** - NOT about MBTA/transit at all (completely off-topic):
-  ❌ "What's the weather in Boston?" - Not transit
-  ❌ "Who won the Red Sox game?" - Not transit (even though it says "Red")
-  ❌ "Boston history facts?" - Not transit
-  ❌ "What's 2+2?" - Not transit
-  ❌ "Tell me a joke" - Not transit
+  #03.25
+**"general"** - NOT directly about MBTA transit. Will route to A2A for Switchboard discovery:
+  ❌ "What's the weather in Boston?" - Route to A2A -> Switchboard discovery
+  ❌ "Who won the Red Sox game?" - Route to A2A -> Switchboard discovery
+  ❌ "Boston history facts?" - Route to A2A -> Switchboard discovery
+  ❌ "What's 2+2?" - Route to A2A -> Switchboard discovery
+  ❌ "Tell me a joke" - Route to A2A -> Switchboard discovery
 
 PRINCIPLE: If query mentions MBTA, trains, T, subway, delays, crowding, stations, routes, or ANY transit topic → NOT "general"!
 
-Only classify as "general" if the query has NOTHING to do with Boston public transit.
+Classify as "general" if the query has NOTHING to do with Boston public transit. These queries will be routed to external agents via Switchboard federated discovery.
 
 ═══════════════════════════════════════════════════════════
 STEP 2: CHOOSE PATH & SELECT TOOL
@@ -1161,11 +1167,21 @@ async def chat_endpoint(request: ChatRequest):
                         metadata.update(a2a_metadata)
                         metadata["mcp_error"] = str(e)
 
+        
         elif chosen_path == "a2a":
             logger.info(f"🔄 A2A Path: {decision['reasoning']}")
             response_text, a2a_metadata = await handle_a2a_path(query, conversation_id)
             path_taken = "a2a"
             metadata.update(a2a_metadata)
+         
+        # 03.25  Adding fallback
+            # If no agents matched across any registry, provide helpful message
+            fallback_phrases = [
+                "couldn't find an agent", "agents unavailable"
+            ]
+            if any(phrase in response_text.lower() for phrase in fallback_phrases):
+                logger.info("ℹ️ No agent matched across any registry")
+                metadata["no_agent_matched"] = True
 
         else:
             logger.warning("MCP selected but unavailable - fallback to A2A")
@@ -1350,7 +1366,198 @@ async def handle_a2a_path(query: str, conversation_id: str) -> tuple[str, Dict[s
             span.record_exception(e)
             return (f"Error: {str(e)}", {"error": str(e)})
 
+# ============================================================================
+# SWITCHBOARD FEDERATED DISCOVERY
+# ============================================================================
 
+async def discover_and_call_via_switchboard(query: str, conversation_id: str) -> tuple[Optional[str], Dict[str, Any]]:
+    """
+    Discover agents via Switchboard's federated /switchboard/agents endpoint,
+    match query to best agent using LLM, then call agent DIRECTLY at its endpoint.
+    
+    Architecture:
+    - Switchboard is discovery-only (pass-through)
+    - Switchboard queries all connected registries (NEST, NEU, AGNTCY)
+    - We call the matched agent directly, not through Switchboard
+    """
+    metadata = {"switchboard_discovery": True}
+    
+    try:
+        logger.info(f"🔍 Switchboard federated discovery for: '{query[:80]}'")
+        
+        # Step 1: Get all agents from Switchboard's federated endpoint
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                resp = await client.get(f"{SWITCHBOARD_URL}/switchboard/agents")
+                if resp.status_code != 200:
+                    logger.warning(f"   Switchboard /switchboard/agents returned: {resp.status_code}")
+                    return None, {"error": f"Switchboard returned {resp.status_code}"}
+                
+                all_agents = resp.json()
+                
+                # Handle different response formats
+                if isinstance(all_agents, dict) and "agents" in all_agents:
+                    agents_list = all_agents["agents"]
+                elif isinstance(all_agents, list):
+                    agents_list = all_agents
+                else:
+                    agents_list = []
+                
+                logger.info(f"   Switchboard returned {len(agents_list)} agents")
+                
+            except Exception as e:
+                logger.error(f"   Switchboard unreachable: {e}")
+                return None, {"error": str(e)}
+        
+        if not agents_list:
+            logger.info("No agents found via Switchboard")
+            return None, {"error": "No agents found"}
+        
+        # Step 2: Use LLM to match query to best agent
+        descriptions = []
+        for a in agents_list:
+            aid = a.get("agent_id") or a.get("agent_name", "unknown")
+            desc = a.get("description", "No description")
+            source = a.get("source_registry") or a.get("registry_id", "unknown")
+            descriptions.append(f"• {aid} [{source}]: {desc}")
+        
+        catalog_text = "\n".join(descriptions)
+        
+        match_prompt = f"""Match this query to the best agent that can answer it.
+
+Query: "{query}"
+
+Available Agents (from all federated registries):
+{catalog_text}
+
+Rules:
+1. If an agent's description matches the query topic, return its ID
+2. If NO agent can answer this query, return "none"
+3. Prefer agents with more specific matching over general ones
+
+Return ONLY valid JSON: {{"best_agent": "agent-id-here", "reasoning": "why this agent"}}"""
+
+        try:
+            match_response = await asyncio.to_thread(
+                openai_client.chat.completions.create,
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": match_prompt}],
+                temperature=0.2,
+                max_tokens=150
+            )
+            
+            match_text = match_response.choices[0].message.content.strip()
+            if match_text.startswith("```"):
+                match_text = match_text.replace("```json", "").replace("```", "").strip()
+            
+            match_result = json.loads(match_text)
+            best_agent_id = match_result.get("best_agent", "none")
+            match_reasoning = match_result.get("reasoning", "")
+            
+            if best_agent_id == "none" or not best_agent_id:
+                logger.info(f"No matching agent found: {match_reasoning}")
+                return None, {"switchboard_agents_checked": len(agents_list)}
+            
+            logger.info(f"Matched: {best_agent_id} — {match_reasoning}")
+            
+        except Exception as e:
+            logger.error(f"Agent matching failed: {e}")
+            return None, {"error": str(e)}
+        
+        # Step 3: Find the agent's endpoint
+        matched_agent = next(
+            (a for a in agents_list
+             if (a.get("agent_id") or a.get("agent_name")) == best_agent_id),
+            None
+        )
+        
+        if not matched_agent:
+            return None, {"error": f"Agent {best_agent_id} not in catalog"}
+        
+        agent_url = (
+            matched_agent.get("agent_url") or
+            matched_agent.get("endpoint") or
+            matched_agent.get("api_url", "")
+        )
+        
+        if not agent_url:
+            return None, {"error": f"No endpoint for {best_agent_id}"}
+        
+        logger.info(f"Calling agent directly at: {agent_url}")
+        
+        # Step 4: Call agent DIRECTLY (try A2A format, then /chat format)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            
+            # Try A2A message format
+            try:
+                a2a_payload = {
+                    "type": "request",
+                    "payload": {
+                        "message": query,
+                        "conversation_id": conversation_id
+                    },
+                    "metadata": {"source": "exchange-switchboard-discovery"}
+                }
+                resp = await client.post(
+                    f"{agent_url.rstrip('/')}/a2a/message",
+                    json=a2a_payload
+                )
+                
+                if resp.status_code == 200:
+                    result = resp.json()
+                    
+                    if result.get("type") == "response" and "payload" in result:
+                        response_text = result["payload"].get("text", "")
+                    elif "response" in result:
+                        response_text = result["response"]
+                    else:
+                        response_text = json.dumps(result)
+                    
+                    metadata.update({
+                        "agent_called": best_agent_id,
+                        "agent_url": agent_url,
+                        "source_registry": matched_agent.get("source_registry", "unknown"),
+                        "call_format": "a2a",
+                        "reasoning": match_reasoning
+                    })
+                    
+                    logger.info(f"{best_agent_id} responded (A2A)")
+                    return response_text, metadata
+            except Exception as e:
+                logger.info(f"A2A call failed: {e}, trying /chat")
+            
+            # Fallback: try /chat format
+            try:
+                chat_payload = {"query": query}
+                resp = await client.post(
+                    f"{agent_url.rstrip('/')}/chat",
+                    json=chat_payload
+                )
+                
+                if resp.status_code == 200:
+                    result = resp.json()
+                    response_text = result.get("response", json.dumps(result))
+                    
+                    metadata.update({
+                        "agent_called": best_agent_id,
+                        "agent_url": agent_url,
+                        "source_registry": matched_agent.get("source_registry", "unknown"),
+                        "call_format": "chat",
+                        "reasoning": match_reasoning
+                    })
+                    
+                    logger.info(f"{best_agent_id} responded (/chat)")
+                    return response_text, metadata
+            except Exception as e:
+                logger.info(f"   /chat call also failed: {e}")
+            
+            logger.warning(f"Could not reach {best_agent_id} at {agent_url}")
+            return None, {"error": f"Agent unreachable at {agent_url}"}
+    
+    except Exception as e:
+        logger.error(f"Switchboard discovery error: {e}", exc_info=True)
+        return None, {"error": str(e)}
+    
 # ============================================================================
 # HEALTH & METRICS
 # ============================================================================
